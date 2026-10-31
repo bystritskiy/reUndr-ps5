@@ -1,0 +1,11 @@
+/source/
+/build/
+/dist/
+/upstream/
+/.venv/
+.DS_Store
+__pycache__/
+
+/logs/
+# Textures taken from the disc, kept next to the drafts for comparison.
+ps5/assets/hd/drafts/*/*-original.png

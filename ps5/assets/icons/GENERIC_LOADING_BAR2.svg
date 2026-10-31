@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32" viewBox="0 0 64 32">
+  <!-- The game supplies the green tint and moves this mask between cells.
+       Bounds are fitted to the restored frame's inner opening using native
+       3840x2160 captures. The asymmetric contour corrects the visible left,
+       top and bottom gaps without moving the game quad or its UVs. -->
+  <path fill="white" d="M19 7.25H48.75L42.25 24.75H13Z"/>
+</svg>

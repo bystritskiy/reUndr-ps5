@@ -1,0 +1,1483 @@
+diff --git a/src/main.c b/src/main.c
+index ad4c36c..7162610 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -1,5 +1,5 @@
+ /**
+- * Need for Speed: Underground 2 (Xbox) - recompiled game entry point
++ * Need for Speed: Underground (Xbox) - recompiled game entry point
+  *
+  * Boot order (same on every host):
+  *   crash reporter -> load default.xbe -> xbox_MemoryLayoutInit ->
+@@ -157,7 +157,7 @@ static void install_crash_reporter(void)
+ /* The CPU exception handler is in switch_nx.c; it calls print_guest_state. */
+ static void install_crash_reporter(void) {}
+ #else
+-#include <execinfo.h>
++/* PS5 has no execinfo. */
+ 
+ static void crash_signal(int sig, siginfo_t *si, void *uc)
+ {
+@@ -166,15 +166,7 @@ static void crash_signal(int sig, siginfo_t *si, void *uc)
+             sig, si->si_addr,
+             (uint32_t)((uintptr_t)si->si_addr - (uintptr_t)g_xbox_mem_offset));
+     print_guest_state();
+-    {
+-        /* The host frames name the lifted function (sub_XXXXXXXX) that
+-         * faulted -- the guest stack alone does not on a worker thread. */
+-        void *frames[32];
+-        int n = backtrace(frames, 32);
+-        fprintf(stderr, "  host backtrace:\n");
+-        fflush(stderr);
+-        backtrace_symbols_fd(frames, n, 2);
+-    }
++
+     signal(sig, SIG_DFL);
+     raise(sig);
+ }
+@@ -283,7 +275,7 @@ int main(int argc, char **argv)
+     return rc;
+ }
+ #else
+-int main(int argc, char **argv)
++int nfsu1_game_main(int argc, char **argv)
+ {
+     (void)argc;
+     (void)argv;
+@@ -302,7 +294,7 @@ static int game_main(void)
+     setvbuf(stdout, NULL, _IONBF, 0);
+     setvbuf(stderr, NULL, _IONBF, 0);
+ 
+-    printf("=== Need for Speed: Underground 2 (Xbox) - static recompilation ===\n");
++    printf("=== Need for Speed: Underground (Xbox) - static recompilation ===\n");
+     install_crash_reporter();
+     if (getenv("NFSU2_EXIT_TRACE"))
+         atexit(print_guest_state);
+@@ -422,11 +414,12 @@ static int game_main(void)
+     xbox_kernel_init();
+     /* text patch: NFSU2 only */
+     nfsu1_options_load();
++    { extern int nv2a_vk_prepare(void); if (!nv2a_vk_prepare()) { fatal("PS5 Vulkan initialization failed. See /data/nfsu1/PPSA99025/stderr.log"); return 1; } }
+     {
+         void nfsu1_extras_init(void);    /* nfsu1_extras.c: timer watchdog, R3 */
+         nfsu1_extras_init();
+     }
+-    xbox_path_init(game_dir, NFSU2_DEFAULT_SAVE_DIR);
++    xbox_path_init(game_dir, "/data/nfsu1/PPSA99025/save");
+     xbox_kernel_bridge_init();
+ 
+     g_esp = XBOX_STACK_TOP;
+diff --git a/src/recomp_manual.c b/src/recomp_manual.c
+index 04dc96a..1c21aee 100644
+--- a/src/recomp_manual.c
++++ b/src/recomp_manual.c
+@@ -428,6 +428,7 @@ void sub_00018E60(void)
+ /* Game flow state: 3 in the front end, 4 loading, 6 racing (the game
+  * itself tests `cmp [0x283434], 3`). */
+ #define NFSU1_GAMEFLOW_STATE 0x00283434u
++#define FE_YAW_ZOOM 1.3f
+ 
+ void sub_00018E40(void)
+ {
+@@ -477,8 +478,16 @@ void sub_00018E40(void)
+             yaw = (e ? (float)atof(e) : 5.0f) * 3.14159265f / 180.0f;
+         }
+         if (yaw != 0.0f) {
+-            float m[16], c = cosf(yaw), s = sinf(yaw);
++            /* The same angle moves a zoomed picture further: at the customize
++             * close-ups it took the car off the screen. Past the garage's own
++             * zoom the turn keeps its distance on screen instead. */
++            float m[16], zoom, turn = yaw, c, s;
+             int j;
++            memcpy(&zoom, (void *)XBOX_PTR(ecx + 0x40), 4);
++            if (zoom > FE_YAW_ZOOM)
++                turn = atanf(tanf(yaw) * FE_YAW_ZOOM / zoom);
++            c = cosf(turn);
++            s = sinf(turn);
+             memcpy(m, (void *)XBOX_PTR(ecx), sizeof m);
+             for (j = 0; j < 4; j++) {
+                 float r0 = m[j], r2 = m[8 + j];
+@@ -626,7 +635,7 @@ void sub_000192C0(void)
+  * 10..15, view(id) = 0x2C5F20 + id*0x60, drawn only while byte +8 is set):
+  * the bytes are cleared for the call and put back after it.
+  *
+- * Vulkan build only: Resolution Scale 1x/1.5x/2x/2.5x (nv2a_vk_scale_pct,
++ * Vulkan build only: Resolution Scale 1x through 4.5x/4K (nv2a_vk_scale_pct,
+  * applied at the next flip; without a saved value RECOMP_GL_SCALE rules
+  * and the row shows the nearest step), Anti-Aliasing = FXAA
+  * (nv2a_vk_fxaa), Anisotropic Off..16x (nv2a_vk_aniso), Square Pixels
+@@ -639,7 +648,7 @@ void sub_000192C0(void)
+ #ifdef __SWITCH__
+ #  define NFSU1_OPTIONS_FILE "sdmc:/switch/nfsu1x/nfsu1x_options.txt"
+ #else
+-#  define NFSU1_OPTIONS_FILE "nfsu1x_options.txt"
++#  define NFSU1_OPTIONS_FILE "/data/nfsu1/PPSA99025/nfsu1x_options.txt"
+ #endif
+ #define FE_PAD_LEFT     0x9120409Eu
+ #define FE_PAD_RIGHT    0xB5971BF1u
+@@ -658,7 +667,8 @@ extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
+ extern void sub_000C2A70_gen(void);
+ extern void sub_00016050_gen(void);
+ 
+-static const int s_scale_pct[] = { 100, 150, 200, 250 };
++static const int s_scale_pct[] = { 100, 150, 200, 225, 250, 300, 450 };
++#define N_SCALE_STEPS ((int)(sizeof s_scale_pct / sizeof s_scale_pct[0]))
+ static const int s_aniso_lvl[] = { 1, 2, 4, 8, 16 };
+ 
+ static int s_refl = 1;                  /* 0 off, 1 on */
+@@ -700,13 +710,13 @@ static void picture_changed(void)
+ 
+ static const char *const s_onoff[] = { "Off", "On" };
+ #ifdef NFSU2_VULKAN
+-static const char *const s_scale_texts[] = { "1x", "1.5x", "2x", "2.5x" };
++static const char *const s_scale_texts[] = { "1x", "1.5x (720p)", "2x", "2.25x (1080p)", "2.5x", "3x (1440p)", "4.5x (4K)" };
+ static const char *const s_aniso_texts[] = { "Off", "2x", "4x", "8x", "16x" };
+ #endif
+ static const OptRow s_rows[] = {
+     { "Car Reflections:", s_onoff, 2, &s_refl, refl_changed },
+ #ifdef NFSU2_VULKAN
+-    { "Resolution Scale:", s_scale_texts, 4, &s_scale_idx, scale_changed },
++    { "Resolution Scale:", s_scale_texts, N_SCALE_STEPS, &s_scale_idx, scale_changed },
+     { "Anti-Aliasing:", s_onoff, 2, &s_fxaa, picture_changed },
+     { "Anisotropic:", s_aniso_texts, 5, &s_aniso_idx, picture_changed },
+     { "Square Pixels:", s_onoff, 2, &s_square, picture_changed },
+@@ -749,7 +759,7 @@ void nfsu1_options_load(void)
+             }
+             else if (!strncmp(line, "scale=", 6)) {
+                 int pct = atoi(line + 6);
+-                for (i = 0; i < 4; i++)
++                for (i = 0; i < N_SCALE_STEPS; i++)
+                     if (s_scale_pct[i] == pct) {
+                         s_scale_idx = i;
+                         s_scale_saved = 1;
+@@ -766,7 +776,7 @@ void nfsu1_options_load(void)
+             /* RECOMP_GL_SCALE stays in charge until the option is changed;
+              * the row shows the nearest step. */
+             double k = strtod(e, NULL), best = 1e9;
+-            for (i = 0; i < 4; i++) {
++            for (i = 0; i < N_SCALE_STEPS; i++) {
+                 double d = fabs(k * 100.0 - s_scale_pct[i]);
+                 if (d < best) { best = d; s_scale_idx = i; }
+             }
+@@ -1074,7 +1084,7 @@ static char s_al_name[32];              /* newest save's profile */
+  * many there are. */
+ static int autoload_find_save(void)
+ {
+-    const char *game = getenv("NFSU2_GAME_DIR");
++    const char *game = "/data/nfsu1/PPSA99025/save";
+     char dir[600], sub[700], path[800];
+     struct dirent *u, *s, *f;
+     DIR *du, *ds, *df;
+@@ -1089,7 +1099,7 @@ static int autoload_find_save(void)
+     if (!(du = opendir(game)))
+         return 0;
+     while ((u = readdir(du))) {                 /* UDATA, any case */
+-        if (strcasecmp(u->d_name, "UDATA"))
++        if (strcasecmp(u->d_name, "UserData"))
+             continue;
+         snprintf(dir, sizeof dir, "%s/%s/45410047", game, u->d_name);
+         if (!(ds = opendir(dir)))
+diff --git a/xboxrecomp/src/kernel/kernel.h b/xboxrecomp/src/kernel/kernel.h
+index c0c0548..c00dd55 100644
+--- a/xboxrecomp/src/kernel/kernel.h
++++ b/xboxrecomp/src/kernel/kernel.h
+@@ -1106,3 +1106,5 @@ void xbox_log(int level, const char* subsystem, const char* fmt, ...);
+ #endif
+ 
+ #endif /* XBOX_KERNEL_H */
++
++BOOL xbox_ProtectGuestRange(PVOID,SIZE_T,DWORD,PDWORD);
+diff --git a/xboxrecomp/src/kernel/kernel_bridge.c b/xboxrecomp/src/kernel/kernel_bridge.c
+index fafc9c1..7e53ee6 100644
+--- a/xboxrecomp/src/kernel/kernel_bridge.c
++++ b/xboxrecomp/src/kernel/kernel_bridge.c
+@@ -8424,7 +8424,7 @@ static void bridge_NtProtectVirtualMemory(void)
+     uint32_t size    = size_ptr ? BRIDGE_MEM32(size_ptr) : 0;
+     DWORD old = 0;
+ 
+-    if (VirtualProtect(XBOX_TO_NATIVE(base_va), size, (DWORD)new_prot, &old)) {
++    if (xbox_ProtectGuestRange(XBOX_TO_NATIVE(base_va), size, (DWORD)new_prot, &old)) {
+         if (old_ptr)
+             BRIDGE_MEM32(old_ptr) = (uint32_t)old;
+         g_eax = 0;  /* STATUS_SUCCESS */
+diff --git a/xboxrecomp/src/kernel/kernel_file.c b/xboxrecomp/src/kernel/kernel_file.c
+index 03a2cae..dbfacea 100644
+--- a/xboxrecomp/src/kernel/kernel_file.c
++++ b/xboxrecomp/src/kernel/kernel_file.c
+@@ -884,6 +884,24 @@ static int handle_stat(HANDLE h, int fd, struct stat *st)
+     return fstat(fd, st);
+ }
+ 
++/* Translate an Xbox OBJECT_ATTRIBUTES path to a host path */
++static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
++                               char* host_path, DWORD buf_size)
++{
++    const char* xbox_path = get_xbox_path(ObjectAttributes);
++    if (!xbox_path)
++        return FALSE;
++    if (ObjectAttributes->RootDirectory && xbox_path[0] != '\\' &&
++        !(xbox_path[0] && xbox_path[1] == ':')) {
++        /* XDeleteSaveGame opens each child relative to its save directory. */
++        const char *root = w32_handle_path(ObjectAttributes->RootDirectory);
++        if (!root) return FALSE;
++        int used = snprintf(host_path, buf_size, "%s/%s", root, xbox_path);
++        return used > 0 && (DWORD)used < buf_size;
++    }
++    return xbox_translate_path(xbox_path, host_path, buf_size);
++}
++
+ NTSTATUS __stdcall xbox_NtCreateFile(
+     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
+     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
+@@ -896,8 +914,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+     if (!FileHandle || !ObjectAttributes)
+         return STATUS_INVALID_PARAMETER;
+ 
+-    const char* xbox_path = get_xbox_path(ObjectAttributes);
+-    if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH)) {
++    if (!translate_obj_path(ObjectAttributes, host_path, MAX_PATH)) {
+         xbox_log(XBOX_LOG_ERROR, XBOX_LOG_FILE, "NtCreateFile: path translation failed");
+         return STATUS_OBJECT_PATH_NOT_FOUND;
+     }
+@@ -1046,8 +1063,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+ NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
+ {
+     char host_path[MAX_PATH];
+-    const char* xbox_path = get_xbox_path(ObjectAttributes);
+-    if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
++    if (!translate_obj_path(ObjectAttributes, host_path, MAX_PATH))
+         return STATUS_OBJECT_PATH_NOT_FOUND;
+     XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %s", host_path);
+     if (unlink(host_path) == 0) return STATUS_SUCCESS;
+@@ -1242,8 +1258,7 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+ 
+     if (!FileInformation)
+         return STATUS_INVALID_PARAMETER;
+-    const char* xbox_path = get_xbox_path(ObjectAttributes);
+-    if (!xbox_path || !xbox_translate_path(xbox_path, host_path, MAX_PATH))
++    if (!translate_obj_path(ObjectAttributes, host_path, MAX_PATH))
+         return STATUS_OBJECT_PATH_NOT_FOUND;
+     if (stat(host_path, &st) != 0)
+         return STATUS_OBJECT_NAME_NOT_FOUND;
+diff --git a/xboxrecomp/src/kernel/kernel_memory.c b/xboxrecomp/src/kernel/kernel_memory.c
+index e49a219..81389cd 100644
+--- a/xboxrecomp/src/kernel/kernel_memory.c
++++ b/xboxrecomp/src/kernel/kernel_memory.c
+@@ -200,10 +200,21 @@ ULONG __stdcall xbox_MmQueryAddressProtect(PVOID VirtualAddress)
+     return PAGE_NOACCESS;
+ }
+ 
++/* PS5: removing access must leave neighbouring 4 KiB guest pages alone. */
++BOOL xbox_ProtectGuestRange(PVOID base,SIZE_T size,DWORD protect,PDWORD old)
++{
++    uintptr_t page=0x4000,access=protect&255;
++    if(access==PAGE_NOACCESS || access==PAGE_READONLY || access==PAGE_EXECUTE || access==PAGE_EXECUTE_READ) {
++        uintptr_t start=((uintptr_t)base+page-1)&~(page-1),end=((uintptr_t)base+size)&~(page-1);
++        if(end<=start) { MEMORY_BASIC_INFORMATION mbi;if(old)*old=VirtualQuery(base,&mbi,sizeof mbi)?mbi.Protect:PAGE_READWRITE;return TRUE; }
++        return VirtualProtect((void *)start,end-start,protect,old);
++    }
++    return VirtualProtect(base,size,protect,old);
++}
+ VOID __stdcall xbox_MmSetAddressProtect(PVOID BaseAddress, ULONG NumberOfBytes, ULONG NewProtect)
+ {
+     DWORD old_protect;
+-    VirtualProtect(BaseAddress, NumberOfBytes, xbox_protect_to_win32(NewProtect), &old_protect);
++    xbox_ProtectGuestRange(BaseAddress, NumberOfBytes, xbox_protect_to_win32(NewProtect), &old_protect);
+     XBOX_TRACE(XBOX_LOG_MEM, "MmSetAddressProtect(%p, %u, 0x%X)", BaseAddress, NumberOfBytes, NewProtect);
+ }
+ 
+diff --git a/xboxrecomp/src/kernel/kernel_path.c b/xboxrecomp/src/kernel/kernel_path.c
+index dcb9fa4..60ac813 100644
+--- a/xboxrecomp/src/kernel/kernel_path.c
++++ b/xboxrecomp/src/kernel/kernel_path.c
+@@ -22,6 +22,11 @@
+  * Returns the number of chars consumed from the prefix, or 0 if no match.
+  * Platform-independent.
+  */
++#if defined(NFSU1_PS5)
++void nfsu1_fmv_movie(const char *xbox_path);
++void nfsu1_ui_text_redirect(char *path, size_t size);
++#endif
++
+ static int match_prefix(const char* path, const char* prefix)
+ {
+     int i = 0;
+@@ -42,6 +47,13 @@ typedef struct {
+ } path_rule;
+ 
+ static const path_rule s_rules[] = {
++    /* PS5: disc is read-only, the XDK's saves on partition 1 must be writable. */
++    { "\\Device\\Harddisk0\\Partition1\\UDATA\\", 1, "\\UserData", "/UserData" },
++    { "\\Device\\Harddisk0\\Partition1\\TDATA\\", 1, "\\TitleData", "/TitleData" },
++
++    { "\\Device\\Harddisk0\\Partition1\\UDATA", 1, "\\UserData", "/UserData" },
++    { "\\Device\\Harddisk0\\Partition1\\TDATA", 1, "\\TitleData", "/TitleData" },
++
+     { "\\Device\\CdRom0\\",                   0, NULL,         NULL          },
+     { "\\Device\\Harddisk0\\Partition1\\",    0, NULL,         NULL          },
+     /* The rest of the disk. Partition 0 is the whole raw device, 2 holds
+@@ -602,7 +614,7 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
+             f = fopen(path, "ab");
+             if (f)
+                 fclose(f);
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) || defined(NFSU1_PS5)
+             continue;       /* exists; its size is reported from the table */
+ #endif
+             if (truncate(path, (off_t)(s_part_sectors[i] * 512ull)) != 0)
+@@ -697,6 +709,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+     /* The request as the title made it; the [FILE] line after the open pairs
+      * with it, the same as on the Win32 backend. */
+     fprintf(stderr, "  [PATH] %s\n", xbox_path);
++#if defined(NFSU1_PS5)
++    nfsu1_fmv_movie(xbox_path);
++#endif
+ 
+     {
+         int digit = xbox_partition_device_digit(xbox_path, 0);
+@@ -752,6 +767,9 @@ translate:
+                 host_path_buf[--n] = '\0';
+         }
+         fix_case(host_path_buf, strlen(base_dir));
++#if defined(NFSU1_PS5)
++        nfsu1_ui_text_redirect(host_path_buf, buf_size);
++#endif
+ 
+         XBOX_TRACE(XBOX_LOG_PATH, "%s -> %s", xbox_path, host_path_buf);
+         return TRUE;
+diff --git a/xboxrecomp/src/kernel/xbox_memory_layout.c b/xboxrecomp/src/kernel/xbox_memory_layout.c
+index 8cbe820..fa08f52 100644
+--- a/xboxrecomp/src/kernel/xbox_memory_layout.c
++++ b/xboxrecomp/src/kernel/xbox_memory_layout.c
+@@ -80,6 +80,7 @@ static void *g_mirror_views[XBOX_NUM_MIRRORS] = {0};
+  * whole range first, then carving views out of ground we hold, removes the
+  * question. */
+ static void *g_span_base = NULL;
++static void *g_extvma_memory = NULL;
+ static size_t g_span_size = 0;
+ static void *g_tiled_view = NULL;
+ 
+@@ -2200,10 +2201,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+         /* Reserve base + mirrors as one range, and map the base at its head.
+          * VirtualFree releases just the slice about to be used, so each view
+          * replaces our own reservation rather than racing for free space. */
+-        g_span_size = g_memory_size * (size_t)(1 + XBOX_NUM_MIRRORS);
++        g_span_size = (size_t)1 << 32; /* PS5: reserve every guest aperture before fixed mappings. */
+         g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
+         if (g_span_base) {
+-            VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
++            /* PS5: direct-memory views replace only our own reservation. */
+             g_memory_base = MapViewOfFileEx(g_mapping_handle,
+                                             FILE_MAP_ALL_ACCESS, 0, 0,
+                                             g_memory_size, g_span_base);
+@@ -2215,7 +2216,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+         }
+ 
+         const size_t n_bases = sizeof(try_bases) / sizeof(try_bases[0]);
+-        for (size_t i = 0; !g_memory_base && i < n_bases; i++) {
++        for (size_t i = 0; !g_memory_base && i < 0; i++) { /* PS5 requires the full reservation. */
+             LPVOID hint = try_bases[i] ? (LPVOID)try_bases[i] : NULL;
+             g_memory_base = MapViewOfFileEx(
+                 g_mapping_handle,
+@@ -2981,7 +2982,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+              * to use; outside it (no reservation) this is a no-op on an
+              * address we never held. */
+             if (g_span_base)
+-                VirtualFree((LPVOID)mirror_base, g_memory_size, MEM_RELEASE);
++                (void)mirror_base; /* reservation stays owned */
+             g_mirror_views[m] = MapViewOfFileEx(
+                 g_mapping_handle,
+                 FILE_MAP_ALL_ACCESS,
+@@ -3032,7 +3033,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+         uint64_t extvma_size = (uint64_t)0x7FFE0000u - aliased_top;
+         void *extvma_base = (void *)((uintptr_t)g_memory_base + (uintptr_t)aliased_top);
+ 
+-        if (VirtualAlloc(extvma_base, (SIZE_T)extvma_size, MEM_RESERVE, PAGE_NOACCESS)) {
++        g_extvma_memory = VirtualAlloc(extvma_base, (SIZE_T)extvma_size, MEM_COMMIT, PAGE_READWRITE);
++        if (g_extvma_memory) {
+             g_xbox_extvma_reserved = 1;
+             fprintf(stderr, "  Extended VMA: reserved %llu MB at %p\n",
+                     (unsigned long long)(extvma_size / (1024 * 1024)), extvma_base);
+@@ -3222,6 +3224,7 @@ void xbox_MemoryLayoutShutdown(void)
+ 
+     /* Whatever is left of the base+mirrors reservation. The views carved out
+      * of it are already unmapped above; this releases the range itself. */
++    if (g_extvma_memory) { VirtualFree(g_extvma_memory,0,MEM_RELEASE);g_extvma_memory=NULL;g_xbox_extvma_reserved=0; }
+     if (g_span_base) {
+         VirtualFree(g_span_base, g_span_size, MEM_RELEASE);
+         g_span_base = NULL;
+diff --git a/xboxrecomp/src/nv2a_vk/nv2a_vk.c b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
+index 773dd12..e6e7887 100644
+--- a/xboxrecomp/src/nv2a_vk/nv2a_vk.c
++++ b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
+@@ -29,7 +29,7 @@
+  *   RECOMP_GL_TRACE=1                shader sources on compile errors
+  *   RECOMP_GL_SCALE=<k>              render surfaces at k times the title's
+  *                                    resolution, fractions allowed (1.5;
+- *                                    0.5..4, default 1)
++ *                                    0.5..4.5, default 1)
+  *   RECOMP_GL_SCALE_X=<k>            horizontal scale, if not the same
+  *   RECOMP_VK_SQUARE=0               widescreen without 4/3 more columns on
+  *                                    surfaces without horizontal AA
+@@ -54,8 +54,8 @@
+ #endif
+ #include <vulkan/vulkan.h>
+ #if !defined(__SWITCH__)
+-#include <SDL.h>
+-#include <SDL_vulkan.h>
++#include <SDL3/SDL.h>
++#include <SDL3/SDL_vulkan.h>
+ #endif
+ #include <glslang/Include/glslang_c_interface.h>
+ #include <glslang/Public/resource_limits_c.h>
+@@ -65,6 +65,12 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
++#if defined(NFSU1_PS5)
++#include <unistd.h>
++#include <sys/stat.h>
++#include "hd_textures.h"
++#include "fmv_replace.h"
++#endif
+ 
+ extern ptrdiff_t xbox_GetMemoryOffset(void);
+ 
+@@ -884,6 +890,7 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
+ 
+ typedef struct {
+     uint32_t va, color, w, h, pitch, hash, bytes;
++    uint32_t image_w, image_h;
+     uint32_t face;              /* cube map: bytes per face; 0 = 2D */
+     uint32_t levels;            /* mip levels in the image */
+     VkImage image; VkImageView view; VkDeviceMemory mem;
+@@ -1078,8 +1085,8 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
+     rg.imageSubresource.mipLevel = level;
+     rg.imageSubresource.baseArrayLayer = layer;
+     rg.imageSubresource.layerCount = 1;
+-    rg.imageExtent.width = t->w >> level ? t->w >> level : 1;
+-    rg.imageExtent.height = t->h >> level ? t->h >> level : 1;
++    rg.imageExtent.width = t->image_w >> level ? t->image_w >> level : 1;
++    rg.imageExtent.height = t->image_h >> level ? t->image_h >> level : 1;
+     rg.imageExtent.depth = 1;
+     vkCmdCopyBufferToImage(s_cb, s_f->ring, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+ }
+@@ -1221,6 +1228,12 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+     uint32_t i, hash;
+     VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
+     uint32_t layers = face ? 6 : 1, f, size;
++    uint32_t image_w=w, image_h=h, image_levels=levels;
++    void *hd_pixels=NULL;
++#if defined(NFSU1_PS5)
++    NfsFmvFrame fmv;
++    const void *fmv_pixels=NULL;
++#endif
+ 
+     for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
+         VkTex *c = &s_tex[i - 1];
+@@ -1251,7 +1264,26 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+     if (s_have_bc && color == 0x0C) fmt = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+     if (s_have_bc && color == 0x0E) fmt = VK_FORMAT_BC2_UNORM_BLOCK;
+     if (s_have_bc && color == 0x0F) fmt = VK_FORMAT_BC3_UNORM_BLOCK;
+-    if (t && (t->fmt != fmt || t->pitch != pitch || t->levels != levels)) {
++#if defined(NFSU1_PS5)
++    if (!face && (color==0x0C || color==0x0E || color==0x0F)) {
++        const NfsHdTexture *hd=nfsu1_hd_find((const uint8_t *)xbox_GetMemoryOffset()+va,
++            color,w,h,tex_bytes(color,w,h,pitch),hash);
++        if (hd && (hd_pixels=nfsu1_hd_load(hd))!=NULL) {
++            image_w=hd->width; image_h=hd->height;
++            image_levels=s_mips ? full_levels(image_w,image_h) : 1;
++            fmt=VK_FORMAT_B8G8R8A8_UNORM;
++        }
++    }
++    if (!face && color==0x06) {
++        nfsu1_fmv_capture(hash,w,h,(const uint8_t *)xbox_GetMemoryOffset()+va);
++        if (nfsu1_fmv_find(hash,w,h,&fmv) && (fmv_pixels=nfsu1_fmv_load(&fmv))!=NULL) {
++            image_w=fmv.width; image_h=fmv.height; image_levels=1;
++            fmt=VK_FORMAT_B8G8R8A8_UNORM;
++        }
++    }
++#endif
++    if (t && (t->fmt != fmt || t->pitch != pitch || t->levels != levels
++              || t->image_w!=image_w || t->image_h!=image_h)) {
+         tex_free(t);
+         t = NULL;
+     }
+@@ -1266,13 +1298,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+             tex_free(t);
+         t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch; t->fmt = fmt;
+         t->face = face; t->levels = levels;
++        t->image_w=image_w; t->image_h=image_h;
+         VT("texture %08X fmt %02X %ux%u pitch %u%s\n", va, color, w, h, pitch,
+            face ? " cube" : "");
+-        if (!make_image_ml(w, h, layers, levels, fmt,
++        if (!make_image_ml(image_w, image_h, layers, image_levels, fmt,
+                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                            VK_IMAGE_ASPECT_COLOR_BIT, &t->image, &t->view, &t->mem)) {
+             memset(t, 0, sizeof *t);
++            free(hd_pixels);
+             return face ? s_dummy_cube_view : s_dummy_view;
+         }
+         tex_index_add(t);
+@@ -1283,12 +1317,22 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+     t->hash = hash;
+     t->used = t->checked = s_frame;
+ 
+-    for (f = 0; f < layers; f++)
+-        tex_fill(t, va + f * face, f);
+-    if (fmt == VK_FORMAT_B8G8R8A8_UNORM && levels > 1)
+-        gen_mips(t->image, w, h, levels, layers);
+-    size = fmt != VK_FORMAT_B8G8R8A8_UNORM ? tex_bytes(color, w, h, 0) : w * h * 4;
+-    if (levels > 1)
++#if defined(NFSU1_PS5)
++    if (fmv_pixels) {
++        tex_upload(t,fmv_pixels,fmv.bytes,0,0,0);
++    } else
++#endif
++    if (hd_pixels) {
++        tex_upload(t,hd_pixels,image_w*image_h*4,0,0,0);
++        free(hd_pixels);
++    } else {
++        for (f = 0; f < layers; f++)
++            tex_fill(t, va + f * face, f);
++    }
++    if (fmt == VK_FORMAT_B8G8R8A8_UNORM && image_levels > 1)
++        gen_mips(t->image, image_w, image_h, image_levels, layers);
++    size = fmt != VK_FORMAT_B8G8R8A8_UNORM ? tex_bytes(color, w, h, 0) : image_w * image_h * 4;
++    if (image_levels > 1)
+         size += size / 3;                   /* the mip chain */
+     tex_account(t, size * layers);
+     return t->view;
+@@ -1650,7 +1694,7 @@ static const char *cache_dir(void)
+ #if defined(__SWITCH__)
+     return "sdmc:/switch/nfsu1x/";
+ #else
+-    return "";
++    return "/data/nfsu1/PPSA99025/";
+ #endif
+ }
+ 
+@@ -2433,30 +2477,29 @@ static int ready(void)
+ #else
+     {
+         const char *e = getenv("RECOMP_VK_HEADLESS");
+-        const char *drv = getenv("SDL_VIDEODRIVER");
+-        s_headless = (e && *e == '1') || (drv && !strcmp(drv, "offscreen"));
++
++        s_headless = (e && *e == '1');
+         if (!s_headless) {
+-            if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
++            if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+                 s_headless = 1;
+             } else {
+-                s_win = SDL_CreateWindow("NV2A (Vulkan)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+-                                         1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
++                int height = 2160, width = 3840;
++                const char *output = getenv("NFSU1_OUTPUT_HEIGHT");
++                if (output && !strcmp(output, "1080")) { width = 1920; height = 1080; }
++                else if (output && !strcmp(output, "1440")) { width = 2560; height = 1440; }
++                s_win = SDL_CreateWindow("Need for Speed Underground", width, height, SDL_WINDOW_VULKAN);
+                 if (!s_win) {
+                     s_headless = 1;
+                 } else {
+-                    unsigned int ne = 0;
+-                    const char *names[8];
+-                    SDL_Vulkan_GetInstanceExtensions(s_win, &ne, NULL);
+-                    if (ne > 6) ne = 6;
+-                    SDL_Vulkan_GetInstanceExtensions(s_win, &ne, names);
++                    Uint32 ne = 0;
++                    const char *const *names = SDL_Vulkan_GetInstanceExtensions(&ne);
++                    if (!names || ne > 8) return 0;
+                     niext = 0;
+-                    for (i = 0; i < ne; i++)
+-                        iext[niext++] = names[i];
++                    for (i = 0; i < ne; i++) iext[niext++] = names[i];
+                 }
+             }
+         }
+-        if (s_headless)
+-            niext = 0;
++        if (s_headless) { LOGE("PS5 display initialization failed: %s\n", SDL_GetError()); return 0; }
+     }
+     {
+         const char *v = getenv("RECOMP_VK_VALIDATION");
+@@ -2495,7 +2538,7 @@ static int ready(void)
+         if (pp.limits.maxFramebufferHeight < m) m = pp.limits.maxFramebufferHeight;
+         s_max_size = m ? m : 4096;
+         if (!(k > 0.0)) k = 1.0;                    /* unset, 0 or garbage */
+-        s_scale = k < 0.5 ? 0.5 : k > 4.0 ? 4.0 : k;
++        s_scale = k < 0.5 ? 0.5 : k > 4.5 ? 4.5 : k;
+         e = getenv("RECOMP_VK_SQUARE");
+         s_square_env = xbox_video_widescreen() && !(e && *e == '0');
+         e = getenv("RECOMP_GL_SCALE_X");
+@@ -2504,7 +2547,7 @@ static int ready(void)
+             s_square_env = 0;
+         s_square = s_square_env && nv2a_vk_square;
+         if (k > 0.0)
+-            s_xratio = (k < 0.5 ? 0.5 : k > 4.0 * 4.0 / 3.0 ? 4.0 * 4.0 / 3.0 : k) / s_scale;
++            s_xratio = (k < 0.5 ? 0.5 : k > 6.0 ? 6.0 : k) / s_scale;
+         s_scale_x = s_scale * s_xratio;
+         if (s_scale != 1.0 || s_scale_x != 1.0 || s_square)
+             fprintf(stderr, "  [VK] rendering at %g x %g (RECOMP_GL_SCALE[_X])%s, surfaces up to %u\n",
+@@ -2565,9 +2608,9 @@ static int ready(void)
+         }
+     }
+ #else
+-    if (!s_headless && !SDL_Vulkan_CreateSurface(s_win, s_inst, &s_surface)) {
++    if (!s_headless && !SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surface)) {
+         LOGE("SDL_Vulkan_CreateSurface: %s\n", SDL_GetError());
+-        s_headless = 1;
++        return 0;
+     }
+ #endif
+ 
+@@ -2613,8 +2656,8 @@ static int ready(void)
+ #undef GET
+ 
+     if (!s_headless && !create_swapchain()) {
+-        LOGE("swapchain creation failed; running headless\n");
+-        s_headless = 1;
++        LOGE("PS5 swapchain creation failed\n");
++        return 0;
+     }
+ 
+     {
+@@ -3787,6 +3830,17 @@ static void dump_surface(VkSurf *s, const char *path)
+     vkCmdCopyImageToBuffer(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, buf, 1, &rg);
+     flush_frame_wait();
+     if (vkMapMemory(s_dev, mem, 0, bci.size, 0, &ptr) == VK_SUCCESS) {
++#if defined(NFSU1_PS5)
++        if (strstr(path, ".png")) {
++            SDL_Surface *shot = SDL_CreateSurfaceFrom(s->pw, s->ph, SDL_PIXELFORMAT_BGRX32,
++                                                      ptr, s->pw * 4);
++            if (shot) {
++                if (SDL_SavePNG(shot, path)) chmod(path, 0666);
++                else LOGE("DevLoop PNG: %s\n", SDL_GetError());
++                SDL_DestroySurface(shot);
++            }
++        } else
++#endif
+         dump_bmp(path, (const uint8_t *)ptr, s->pw, s->ph);
+         vkUnmapMemory(s_dev, mem);
+     }
+@@ -4180,7 +4234,7 @@ static void vk_flip(void)
+     s_rt_depth = NULL;
+     {
+         int pct = nv2a_vk_scale_pct;
+-        double k = pct < 50 ? 0.0 : pct > 400 ? 4.0 : pct / 100.0;
++        double k = pct < 50 ? 0.0 : pct > 450 ? 4.5 : pct / 100.0;
+         int sq = s_square_env && nv2a_vk_square;
+         if (!(k > 0.0))
+             k = s_scale;
+@@ -4189,6 +4243,15 @@ static void vk_flip(void)
+             rescale_surfaces(k);
+         }
+     }
++#if defined(NFSU1_PS5)
++    /* DevLoop request is consumed only when a real surface is ready. */
++    if (s && s_drew_any && s_frame % 4 == 0 && unlink("/app0/devloop-shot") == 0) {
++        mkdir("/app0/screenshots", 0777);
++        chmod("/app0/screenshots", 0777);
++        dump_surface(s, "/app0/screenshots/frame.png.part");
++        rename("/app0/screenshots/frame.png.part", "/app0/screenshots/frame.png");
++    }
++#endif
+     if (s && s_drew_any && dump_every && ((s_frame % (uint32_t)dump_every) == 0
+                                           || (s_inst_alt && s_frame % (uint32_t)dump_every == 1))) {
+         char path[320];
+@@ -4202,6 +4265,17 @@ static void vk_flip(void)
+     }
+     barrier_all();
+ 
++#if defined(NFSU1_PS5)
++    /* Record actual render dimensions, independently of requested scale/output. */
++    if (s && s_drew_any) {
++        static uint32_t last_w, last_h, last_pw, last_ph;
++        if (s->w != last_w || s->h != last_h || s->pw != last_pw || s->ph != last_ph) {
++            fprintf(stderr, "[PS5 picture] guest %ux%u, render %ux%u, output %ux%u\n",
++                    s->w, s->h, s->pw, s->ph, s_sc_extent.width, s_sc_extent.height);
++            last_w = s->w; last_h = s->h; last_pw = s->pw; last_ph = s->ph;
++        }
++    }
++#endif
+     VT("flip %u: surface %08X drew %d, acquiring\n", s_frame, s ? s->va : 0, s_drew_any);
+     if (!s_headless) {
+         VkResult rr = vkAcquireNextImageKHR(s_dev, s_swapchain, UINT64_MAX, s_f->acquired,
+@@ -4777,3 +4851,6 @@ void nv2a_vk_install(void)
+     nv2a_backend_register(&s_backend);
+     fprintf(stderr, "[BOOT] NV2A Vulkan renderer registered\n");
+ }
++
++/* PS5: fail at boot when VideoOut or required Vulkan features are unavailable. */
++int nv2a_vk_prepare(void) { return ready(); }
+diff --git a/xboxrecomp/src/platform/win32_compat.c b/xboxrecomp/src/platform/win32_compat.c
+index 63108db..ffd7d1f 100644
+--- a/xboxrecomp/src/platform/win32_compat.c
++++ b/xboxrecomp/src/platform/win32_compat.c
+@@ -46,7 +46,9 @@
+ #include <sys/stat.h>
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
+-#elif !defined(__SWITCH__)
++#elif defined(NFSU1_PS5)
++#include <sys/sysctl.h>
++#else
+ #include <sys/sysinfo.h>
+ #endif
+ 
+@@ -329,6 +331,8 @@ typedef struct w32_object {
+     /* file mapping / fd-backed file handle */
+     int             fd;
+     SIZE_T          map_size;
++    void *mapping_payload;
++    void (*mapping_release)(void *);
+     char           *file_path;
+     int             delete_on_close;   /* NT delete disposition: at last close */
+ } w32_object;
+@@ -463,6 +467,7 @@ static void obj_release(w32_object *o)
+                     o->file_path, errno);
+         free(o->file_path);
+     } else if (o->kind == K_FILEMAP) {
++        if (o->mapping_release) o->mapping_release(o->mapping_payload);
+         if (o->fd >= 0) close(o->fd);
+     } else if (o->kind == K_WAITABLE_TIMER) {
+         /* Waitable timers: no special cleanup needed */
+@@ -921,6 +926,8 @@ void xbox_guest_pin(int interrupt)
+      * interrupt thread goes above it so it pre-empts guest threads. */
+     if (interrupt)
+         svcSetThreadPriority(CUR_THREAD_HANDLE, 0x2C);
++#elif defined(NFSU1_PS5)
++    { extern int scePthreadSetaffinity(unsigned long,unsigned long); scePthreadSetaffinity((unsigned long)pthread_self(),1ul<<core); }
+ #else
+     {
+         cpu_set_t set;
+@@ -1579,411 +1586,19 @@ SIZE_T HeapSize(HANDLE heap, DWORD flags, LPCVOID mem)
+ 
+ void view_register(void *addr, size_t len);
+ size_t view_take(const void *addr);
+-#if defined(__SWITCH__)
+-/* Virtual memory on Horizon.
+- *
+- * Win32 semantics, which is what xbox_memory_layout.c is written against:
+- *
+- *   MEM_RESERVE         address space only. Taken from libnx's ASLR region
+- *                       as a reservation, so nothing else is placed there.
+- *                       The first reservation is widened to 4 GB + 64 KB:
+- *                       every guest aperture (0x80000000, 0xF0000000,
+- *                       0xFD000000...) must land at base + VA, and a smaller
+- *                       reservation would leave them to chance.
+- *   MEM_COMMIT at addr  a shared-memory object of that size, mapped there.
+- *                       The kernel hands it over zeroed.
+- *   MEM_COMMIT, no addr the heap, page aligned.
+- *   file mapping        a shared-memory object; each view maps it again.
+- *                       That is what makes the RAM mirrors and the tiled
+- *                       aperture true aliases, as on the console.
+- *
+- * Protection changes are accepted and ignored: shared memory is mapped RW
+- * and Horizon will not change a shared mapping's permissions, and nothing on
+- * this host traps faults anyway.
+- */
+-typedef struct {
+-    uintptr_t addr;
+-    size_t    len;
+-    Handle    shm;          /* shared- or code-memory object; 0 for heap */
+-    int       owns_shm;     /* close the object on release */
+-    int       heap;
+-    void     *src;          /* code memory: the heap block behind the view */
+-    uintptr_t alias_of;     /* svcMapProcessMemory view: the address it mirrors */
+-} nx_region;
+-
+-#define NX_MAX_REGIONS 256
+-static nx_region       s_nx[NX_MAX_REGIONS];
+-static pthread_mutex_t s_nx_lock = PTHREAD_MUTEX_INITIALIZER;
+-static int             s_nx_first_reserve = 1;
+-
+-/* How committed memory is obtained.
+- *
+- *   NX_SHARED    shared-memory objects: views alias.
+- *   NX_PHYSICAL  code memory -- the mechanism JITs use: a heap block wrapped
+- *                in a code-memory object, its owner view mapped read-write
+- *                at the address wanted. For hosts where svcCreateSharedMemory
+- *                is unavailable (Eden answers 0x4201 NotImplemented).
+- *                (svcMapPhysicalMemory would be simpler but needs a system
+- *                resource homebrew does not have: 0xFA01 InvalidState.)
+- *                One view per block, so a second view of a mapping cannot
+- *                alias the first: it fails, and the memory layout carries on
+- *                without the RAM mirrors and the tiled-aperture view. */
+-enum { NX_UNKNOWN, NX_SHARED, NX_PHYSICAL };
+-static int s_nx_mode = NX_UNKNOWN;
+-
+-static void nx_probe(void)
+-{
+-    Handle h;
+-
+-    if (s_nx_mode != NX_UNKNOWN)
+-        return;
+-    /* Ask the loader first. On the console an SVC outside the process's
+-     * permitted set does not fail -- the kernel terminates the process, and
+-     * hbloader does not grant homebrew CreateSharedMemory (0x50). The code-
+-     * memory SVCs (0x4B/0x4C) are the ones JIT homebrew relies on. */
+-    fprintf(stderr, "  [NX] syscall hints: CreateSharedMemory %d MapSharedMemory %d"
+-                    " CreateCodeMemory %d ControlCodeMemory %d\n",
+-            envIsSyscallHinted(0x50), envIsSyscallHinted(0x13),
+-            envIsSyscallHinted(0x4B), envIsSyscallHinted(0x4C));
+-    /* Code memory is the default: it is what runs in Eden, and a hint is
+-     * not a promise on the console. RECOMP_NX_SHM=1 tries shared memory
+-     * (aliasing mirrors) where the loader offers it. */
+-    if (getenv("RECOMP_NX_SHM") && strcmp(getenv("RECOMP_NX_SHM"), "1") == 0
+-            && envIsSyscallHinted(0x50) && envIsSyscallHinted(0x13)
+-            && R_SUCCEEDED(svcCreateSharedMemory(&h, 0x1000, Perm_Rw, Perm_R))) {
+-        svcCloseHandle(h);
+-        s_nx_mode = NX_SHARED;
+-    } else {
+-        s_nx_mode = NX_PHYSICAL;
+-    }
+-    if (s_nx_mode == NX_PHYSICAL && !(envIsSyscallHinted(0x4B) && envIsSyscallHinted(0x4C)))
+-        fprintf(stderr, "  [NX] WARNING: code-memory SVCs are not hinted either;"
+-                        " guest memory cannot be mapped\n");
+-    fprintf(stderr, "  [NX] guest memory from %s\n",
+-            s_nx_mode == NX_SHARED ? "shared-memory objects (aliasing views)"
+-                                   : "code-memory views of heap blocks (no aliasing)");
+-}
+-
+-static size_t nx_page(size_t n) { return (n + 0xFFFu) & ~(size_t)0xFFFu; }
+-
+-static nx_region *nx_find(uintptr_t addr)
+-{
+-    int i;
+-    for (i = 0; i < NX_MAX_REGIONS; i++)
+-        if (s_nx[i].len && addr >= s_nx[i].addr && addr < s_nx[i].addr + s_nx[i].len)
+-            return &s_nx[i];
+-    return NULL;
+-}
+-
+-static nx_region *nx_add(uintptr_t addr, size_t len, Handle shm, int owns, int heap);
+-
+-/* Fresh memory at `a` by whichever mechanism this host has. */
+-static int nx_commit(uintptr_t a, size_t len)
+-{
+-    Handle shm = 0;
+-    Result rc;
+-
+-    if (s_nx_mode == NX_PHYSICAL) {
+-        void *src = memalign(0x1000, len);
+-        nx_region *r;
+-        if (!src) {
+-            fprintf(stderr, "  [NX] out of heap for %zu KB at %p\n", len / 1024, (void *)a);
+-            return 0;
+-        }
+-        rc = svcCreateCodeMemory(&shm, src, len);
+-        if (R_SUCCEEDED(rc))
+-            rc = svcControlCodeMemory(shm, CodeMapOperation_MapOwner, (void *)a, len,
+-                                      Perm_Rw);
+-        if (R_FAILED(rc)) {
+-            fprintf(stderr, "  [NX] code-memory view of %zu KB at %p failed: 0x%X\n",
+-                    len / 1024, (void *)a, rc);
+-            if (shm) svcCloseHandle(shm);
+-            free(src);
+-            return 0;
+-        }
+-        memset((void *)a, 0, len);
+-        r = nx_add(a, len, shm, 1, 0);
+-        if (r) r->src = src;
+-        return 1;
+-    }
+-    rc = svcCreateSharedMemory(&shm, len, Perm_Rw, Perm_R);
+-    if (R_FAILED(rc)) {
+-        fprintf(stderr, "  [NX] create %zu KB of shared memory failed: 0x%X\n",
+-                len / 1024, rc);
+-        return 0;
+-    }
+-    rc = svcMapSharedMemory(shm, (void *)a, len, Perm_Rw);
+-    if (R_FAILED(rc)) {
+-        fprintf(stderr, "  [NX] map shared memory at %p (+%zu KB) failed: 0x%X\n",
+-                (void *)a, len / 1024, rc);
+-        svcCloseHandle(shm);
+-        return 0;
+-    }
+-    nx_add(a, len, shm, 1, 0);
+-    return 1;
+-}
+-
+-static nx_region *nx_add(uintptr_t addr, size_t len, Handle shm, int owns, int heap)
+-{
+-    int i;
+-    for (i = 0; i < NX_MAX_REGIONS; i++)
+-        if (!s_nx[i].len) {
+-            s_nx[i].addr = addr; s_nx[i].len = len; s_nx[i].shm = shm;
+-            s_nx[i].owns_shm = owns; s_nx[i].heap = heap;
+-            return &s_nx[i];
+-        }
+-    return NULL;
+-}
+-
+-/* Map `len` bytes of shared-memory object `shm` at `addr`. */
+-static int nx_map_shm(Handle shm, uintptr_t addr, size_t len)
++HANDLE w32_direct_mapping_handle(void *payload, void (*release)(void *))
+ {
+-    Result rc = svcMapSharedMemory(shm, (void *)addr, len, Perm_Rw);
+-    if (R_FAILED(rc)) {
+-        fprintf(stderr, "  [NX] map shared memory at %p (+%zu KB) failed: 0x%X\n",
+-                (void *)addr, len / 1024, rc);
+-        return 0;
+-    }
+-    return 1;
+-}
+-
+-LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD protect)
+-{
+-    size_t len = nx_page(size);
+-    (void)protect;
+-
+-    if (!len) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
+-    pthread_mutex_lock(&s_nx_lock);
+-    nx_probe();
+-
+-    if (!address && !(allocationType & MEM_COMMIT)) {           /* reserve */
+-        size_t want = len;
+-        void *at;
+-        if (s_nx_first_reserve) {
+-            s_nx_first_reserve = 0;
+-            if (want < 0x100010000ull) want = 0x100010000ull;
+-        }
+-        virtmemLock();
+-        at = virtmemFindAslr(want, 0x10000);
+-        if (at) virtmemAddReservation(at, want);
+-        virtmemUnlock();
+-        pthread_mutex_unlock(&s_nx_lock);
+-        if (!at) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+-        fprintf(stderr, "  [NX] reserved %zu MB at %p\n", want >> 20, at);
+-        return at;
+-    }
+-
+-    if (!address) {                                             /* heap */
+-        void *p = memalign(0x1000, len);
+-        if (p) {
+-            memset(p, 0, len);
+-            nx_add((uintptr_t)p, len, 0, 0, 1);
+-            view_register(p, len);
+-        }
+-        pthread_mutex_unlock(&s_nx_lock);
+-        if (!p) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-        return p;
+-    }
+-
+-    if (!(allocationType & MEM_COMMIT)) {                       /* reserve at addr */
+-        pthread_mutex_unlock(&s_nx_lock);
+-        return address;         /* inside our own reservation: nothing to do */
+-    }
+-
+-    {                                                           /* commit at addr */
+-        uintptr_t a = (uintptr_t)address & ~(uintptr_t)0xFFF;
+-        nx_region *r = nx_find(a);
+-
+-        if (r && a + len <= r->addr + r->len) {                 /* already there */
+-            pthread_mutex_unlock(&s_nx_lock);
+-            return address;
+-        }
+-        if (!nx_commit(a, len)) {
+-            pthread_mutex_unlock(&s_nx_lock);
+-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-            return NULL;
+-        }
+-        view_register((void *)a, len);
+-        pthread_mutex_unlock(&s_nx_lock);
+-        return (LPVOID)a;
+-    }
+-}
+-
+-BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD freeType)
+-{
+-    nx_region *r;
+-    (void)size;
+-
+-    if (!(freeType & MEM_RELEASE))
+-        return TRUE;                              /* decommit: keep it */
+-    pthread_mutex_lock(&s_nx_lock);
+-    r = nx_find((uintptr_t)address);
+-    if (r && r->addr == (uintptr_t)address) {
+-        view_take(address);
+-        if (r->heap) {
+-            free((void *)r->addr);
+-        } else if (r->alias_of) {
+-            svcUnmapProcessMemory((void *)r->addr, envGetOwnProcessHandle(),
+-                                  (u64)r->alias_of, r->len);
+-        } else if (r->src) {
+-            svcControlCodeMemory(r->shm, CodeMapOperation_UnmapOwner,
+-                                 (void *)r->addr, r->len, 0);
+-            svcCloseHandle(r->shm);
+-            free(r->src);
+-        } else {
+-            svcUnmapSharedMemory(r->shm, (void *)r->addr, r->len);
+-            if (r->owns_shm)
+-                svcCloseHandle(r->shm);
+-        }
+-        memset(r, 0, sizeof *r);
+-    }
+-    /* Releasing a slice of a reservation (to map a view into it) is a
+-     * no-op here: reservations are bookkeeping, and the view maps over it. */
+-    pthread_mutex_unlock(&s_nx_lock);
+-    return TRUE;
+-}
+-
+-BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldProtect)
+-{
+-    (void)address; (void)size; (void)newProtect;
+-    if (oldProtect) *oldProtect = PAGE_READWRITE;
+-    return TRUE;
+-}
+-#else
+-static int prot_from_page(DWORD protect)
+-{
+-    switch (protect & 0xFF) {
+-    case PAGE_NOACCESS:          return PROT_NONE;
+-    case PAGE_READONLY:          return PROT_READ;
+-    case PAGE_READWRITE:         return PROT_READ | PROT_WRITE;
+-    case PAGE_EXECUTE:           return PROT_EXEC;
+-    case PAGE_EXECUTE_READ:      return PROT_READ | PROT_EXEC;
+-    case PAGE_EXECUTE_READWRITE: return PROT_READ | PROT_WRITE | PROT_EXEC;
+-    default:                     return PROT_READ | PROT_WRITE;
+-    }
+-}
+-
+-/* Length registry, defined with the view helpers below. Win32 frees by address
+- * alone -- UnmapViewOfFile takes no length and VirtualFree(MEM_RELEASE) is
+- * documented to take size 0 -- so the length has to be recoverable here or
+- * munmap cannot be called at all. */
+-#if defined(__APPLE__)
+-/* Darwin has no MAP_FIXED_NOREPLACE, and the two mmap options are both wrong
+- * for VirtualAlloc: MAP_FIXED silently unmaps whatever already occupies the
+- * range, and a bare address hint can be relocated by the kernel for reasons
+- * other than the range being taken -- so "we got a different address" is only
+- * an approximation of "it was occupied", and a racy one.
+- *
+- * mach_vm_map with VM_FLAGS_FIXED is the exact primitive: it maps at the
+- * address given, and returns KERN_NO_SPACE rather than displacing an existing
+- * mapping. That is what Win32 promises, and this layer exists to keep the Xbox
+- * HLE above it honest -- a VirtualAlloc that quietly replaced a live mapping
+- * would corrupt whatever held it, far from the call that did it.
+- *
+- * Memory from mach_vm_map is released by munmap like any other, because the
+- * BSD and Mach halves of Darwin share one VM map, so VirtualFree is unchanged.
+- */
+-
+-static void *mach_map_fixed(void *address, size_t size, int prot)
+-{
+-    mach_vm_address_t addr = (mach_vm_address_t)(uintptr_t)address;
+-    mach_vm_size_t len = (size + vm_page_size - 1) & ~((mach_vm_size_t)vm_page_size - 1);
+-    vm_prot_t vmprot = VM_PROT_NONE;
+-
+-    if (prot & PROT_READ)  vmprot |= VM_PROT_READ;
+-    if (prot & PROT_WRITE) vmprot |= VM_PROT_WRITE;
+-    if (prot & PROT_EXEC)  vmprot |= VM_PROT_EXECUTE;
+-
+-    kern_return_t kr = mach_vm_map(
+-        mach_task_self(),
+-        &addr,
+-        len,
+-        0,
+-        VM_FLAGS_FIXED,
+-        MEMORY_OBJECT_NULL,
+-        0,
+-        FALSE,
+-        vmprot,
+-        VM_PROT_ALL,
+-        VM_INHERIT_DEFAULT
+-    );
+-    if (kr != KERN_SUCCESS) {
+-        return MAP_FAILED;
+-    }
+-    return (void *)(uintptr_t)addr;
+-}
+-#endif
+-
+-LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD protect)
+-{
+-    int prot  = prot_from_page(protect);
+-    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+-
+-    /* MEM_COMMIT on a region already reserved by a prior VirtualAlloc:
+-     * just adjust protection. */
+-    if ((allocationType & MEM_COMMIT) && !(allocationType & MEM_RESERVE) && address) {
+-        if (mprotect(address, size, prot) == 0)
+-            return address;
+-        /* fall through to a fresh mapping */
+-    }
+-
+-#if defined(MAP_FIXED_NOREPLACE)
+-    if (address) flags |= MAP_FIXED_NOREPLACE;
+-#endif
+-
+-    void *p;
+-#if defined(__APPLE__)
+-    if (address) {
+-        p = mach_map_fixed(address, size, prot ? prot : PROT_READ | PROT_WRITE);
+-    } else
+-#endif
+-    p = mmap(address, size, prot ? prot : PROT_READ | PROT_WRITE, flags, -1, 0);
+-    if (p == MAP_FAILED) {
+-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-        return NULL;
+-    }
+-    /* Remember the length: VirtualFree(MEM_RELEASE) is passed size 0 by every
+-     * Win32 caller, and munmap cannot be called without one. */
+-    view_register(p, size);
+-#if !defined(MAP_FIXED_NOREPLACE) && !defined(__APPLE__)
+-    /* Older kernels without MAP_FIXED_NOREPLACE: plain MAP_FIXED would silently
+-     * unmap whatever already lives there, so we pass the address as a hint and
+-     * treat a different result as "taken". Apple goes through mach_map_fixed
+-     * above, which reports that properly instead of inferring it. */
+-    if (address && p != address) {
+-        munmap(p, size);
+-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-        return NULL;
+-    }
+-#endif
+-    return p;
+-}
+-
+-BOOL VirtualFree(LPVOID address, SIZE_T size, DWORD freeType)
+-{
+-    if (freeType & MEM_RELEASE) {
+-        /* Win32 MEM_RELEASE passes size 0 and frees the whole allocation, so
+-         * the length comes from the registry VirtualAlloc filled in. Returning
+-         * TRUE without unmapping -- as this used to -- made every release a
+-         * silent no-op: the caller believed the address was free, the next
+-         * allocation there failed, and nothing connected the two. */
+-        size_t len = view_take(address);
+-        if (size == 0) size = len;
+-        if (size == 0) return FALSE;
+-        return munmap(address, size) == 0;
+-    }
+-    if (freeType & MEM_DECOMMIT)
+-        return mprotect(address, size, PROT_NONE) == 0;
+-    return TRUE;
++    w32_object *o = obj_alloc(K_FILEMAP);
++    if (!o) return NULL;
++    o->fd = -1; o->mapping_payload = payload; o->mapping_release = release;
++    return (HANDLE)o;
+ }
+-
+-BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldProtect)
++void *w32_direct_mapping_payload(HANDLE h)
+ {
+-    if (oldProtect) *oldProtect = PAGE_READWRITE;
+-    return mprotect(address, size, prot_from_page(newProtect)) == 0;
++    w32_object *o = obj_from(h);
++    return o && o->kind == K_FILEMAP ? o->mapping_payload : NULL;
+ }
+ 
+-#endif /* __SWITCH__ */
+ 
+ /* ===================================================================== */
+ /* Time                                                                  */
+@@ -2104,7 +1719,7 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
+ #if defined(__APPLE__)
+     memset_s(ptr, cnt, 0, cnt);
+ #else
+-    explicit_bzero(ptr, cnt);
++    volatile unsigned char *p = ptr; while (cnt--) *p++ = 0;
+ #endif
+ }
+ 
+@@ -2383,237 +1998,7 @@ size_t view_take(const void *addr)
+     return len;
+ }
+ 
+-#if defined(__SWITCH__)
+-/* File mappings on Horizon: a shared-memory object per mapping, mapped
+- * again for every view -- see "Virtual memory on Horizon" above. */
+-HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
+-                          DWORD maxSizeHigh, DWORD maxSizeLow, LPCSTR name)
+-{
+-    SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
+-    Handle shm;
+-    Result rc;
+-    w32_object *o;
+-
+-    (void)file; (void)sa; (void)protect; (void)name;
+-    if (!size) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
+-    pthread_mutex_lock(&s_nx_lock);
+-    nx_probe();
+-    pthread_mutex_unlock(&s_nx_lock);
+-    if (s_nx_mode == NX_PHYSICAL) {
+-        /* No object to share: the first view gets fresh memory, and later
+-         * views -- which would need to alias it -- fail (MapViewOfFileEx). */
+-        o = obj_alloc(K_FILEMAP);
+-        o->fd       = -1;
+-        o->map_size = size;
+-        return (HANDLE)o;
+-    }
+-    rc = svcCreateSharedMemory(&shm, nx_page(size), Perm_Rw, Perm_R);
+-    if (R_FAILED(rc)) {
+-        fprintf(stderr, "  [NX] file mapping of %zu KB failed: 0x%X\n",
+-                (size_t)size / 1024, rc);
+-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-        return NULL;
+-    }
+-    o = obj_alloc(K_FILEMAP);
+-    o->fd       = (int)shm;
+-    o->map_size = size;
+-    return (HANDLE)o;
+-}
+-
+-HANDLE CreateFileMappingW(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
+-                          DWORD maxSizeHigh, DWORD maxSizeLow, LPCWSTR name)
+-{
+-    (void)name;
+-    return CreateFileMappingA(file, sa, protect, maxSizeHigh, maxSizeLow, NULL);
+-}
+-
+-LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow,
+-                       SIZE_T count, LPVOID baseAddr)
+-{
+-    w32_object *o = obj_from(mapping);
+-    size_t len;
+-    uintptr_t at;
+-
+-    (void)access; (void)count;
+-    if (!o || o->kind != K_FILEMAP) { SetLastError(ERROR_INVALID_HANDLE); return NULL; }
+-    if (offHigh || offLow) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
+-    /* Horizon maps a shared-memory object whole. */
+-    len = nx_page(o->map_size);
+-    pthread_mutex_lock(&s_nx_lock);
+-    if (baseAddr) {
+-        at = (uintptr_t)baseAddr;
+-    } else {
+-        virtmemLock();
+-        at = (uintptr_t)virtmemFindAslr(len, 0x10000);
+-        virtmemUnlock();
+-    }
+-    if (o->fd == -1) {                              /* NX_PHYSICAL */
+-        if (o->timer_due) {                         /* already has its first view */
+-            /* A second view has to be the same memory: the Xbox reaches RAM
+-             * at 0x00000000 and again at 0x80000000, and a title writes
+-             * through one and reads through the other -- without the alias
+-             * a pointer read back through 0x80xxxxxx was stale (0xAAAAAAAA)
+-             * and crashed the console build after Start. svcMapProcessMemory
+-             * on our own process maps the first view's pages again. */
+-            static int said;
+-            Result rc = (Result)-1;
+-            if (at && o->nx_view0 && envIsSyscallHinted(0x74))
+-                rc = svcMapProcessMemory((void *)at, envGetOwnProcessHandle(),
+-                                         (u64)o->nx_view0, len);
+-            if (R_SUCCEEDED(rc)) {
+-                nx_region *r = nx_add(at, len, 0, 0, 0);
+-                if (r) r->alias_of = o->nx_view0;
+-                if (!said++)
+-                    fprintf(stderr, "  [NX] aliasing views with svcMapProcessMemory\n");
+-                view_register((void *)at, len);
+-                pthread_mutex_unlock(&s_nx_lock);
+-                return (LPVOID)at;
+-            }
+-            if (!said++)
+-                fprintf(stderr, "  [NX] second view of a mapping refused (0x%X): this host"
+-                        " cannot alias memory\n", rc);
+-            pthread_mutex_unlock(&s_nx_lock);
+-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-            return NULL;
+-        }
+-        if (!baseAddr) {
+-            virtmemLock();
+-            at = (uintptr_t)virtmemFindAslr(len, 0x10000);
+-            virtmemUnlock();
+-        }
+-        if (!at || !nx_commit(at, len)) {
+-            pthread_mutex_unlock(&s_nx_lock);
+-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-            return NULL;
+-        }
+-        o->timer_due = 1;
+-        o->nx_view0 = at;
+-        view_register((void *)at, len);
+-        pthread_mutex_unlock(&s_nx_lock);
+-        return (LPVOID)at;
+-    }
+-    if (!at || !nx_map_shm((Handle)o->fd, at, len)) {
+-        pthread_mutex_unlock(&s_nx_lock);
+-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-        return NULL;
+-    }
+-    nx_add(at, len, (Handle)o->fd, 0, 0);
+-    view_register((void *)at, len);
+-    pthread_mutex_unlock(&s_nx_lock);
+-    return (LPVOID)at;
+-}
+-
+-BOOL UnmapViewOfFile(LPCVOID baseAddr)
+-{
+-    return VirtualFree((LPVOID)baseAddr, 0, MEM_RELEASE);
+-}
+-#else
+-/* An unnamed file descriptor that ftruncate and mmap both accept. Linux has
+- * memfd_create for this; elsewhere an immediately-unlinked temp file does. */
+-static int anon_map_fd(const char *name)
+-{
+-#if defined(__APPLE__)
+-    static volatile LONG map_counter = 0;
+-    char shm_name[32];
+-    LONG seq = InterlockedIncrement(&map_counter);
+-    const char *base = name ? name : "xbox_map";
+-    snprintf(shm_name, sizeof(shm_name), "/%s_%ld", base, seq);
+-    int fd = shm_open(shm_name, O_CREAT | O_RDWR | O_EXCL, 0600);
+-    if (fd >= 0) shm_unlink(shm_name);
+-    return fd;
+-#else
+-    return memfd_create(name ? name : "xbox_map", 0);
+-#endif
+-}
+-
+-HANDLE CreateFileMappingA(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
+-                          DWORD maxSizeHigh, DWORD maxSizeLow, LPCSTR name)
+-{
+-    (void)file; (void)sa; (void)protect;
+-    SIZE_T size = ((SIZE_T)maxSizeHigh << 32) | maxSizeLow;
+-    if (size == 0) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
+-
+-    int fd = anon_map_fd(name);
+-    if (fd < 0) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+-    if (ftruncate(fd, (off_t)size) != 0) {
+-        close(fd);
+-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+-        return NULL;
+-    }
+-
+-    w32_object *o = obj_alloc(K_FILEMAP);
+-    o->fd       = fd;
+-    o->map_size = size;
+-    return (HANDLE)o;
+-}
+-
+-HANDLE CreateFileMappingW(HANDLE file, LPSECURITY_ATTRIBUTES sa, DWORD protect,
+-                          DWORD maxSizeHigh, DWORD maxSizeLow, LPCWSTR name)
+-{
+-    (void)name;
+-    return CreateFileMappingA(file, sa, protect, maxSizeHigh, maxSizeLow, NULL);
+-}
+-
+-LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow,
+-                       SIZE_T count, LPVOID baseAddr)
+-{
+-    w32_object *o = obj_from(mapping);
+-    if (!o || o->kind != K_FILEMAP) { SetLastError(ERROR_INVALID_HANDLE); return NULL; }
+ 
+-    off_t  off = ((off_t)offHigh << 32) | offLow;
+-    SIZE_T len = count ? count : (o->map_size - (SIZE_T)off);
+-    int prot   = PROT_READ | ((access != FILE_MAP_READ) ? PROT_WRITE : 0);
+-    int flags  = MAP_SHARED;
+-
+-    /* Win32 MapViewOfFileEx *fails* when the requested address is unavailable.
+-     * Plain MAP_FIXED does the opposite: it silently unmaps whatever is there
+-     * and succeeds. The Xbox memory model asks for 28 mirror views at computed
+-     * addresses, so with a base the OS chose rather than one we picked, that
+-     * difference is the process quietly destroying its own libraries and heap
+-     * and dying somewhere unrelated a moment later. */
+-    if (baseAddr) {
+-#if defined(MAP_FIXED_NOREPLACE)
+-        flags |= MAP_FIXED_NOREPLACE;
+-#elif defined(__APPLE__)
+-        /* Darwin has no MAP_FIXED_NOREPLACE. Claim the range first with
+-         * mach_vm_map(VM_FLAGS_FIXED), which refuses rather than displaces;
+-         * MAP_FIXED below can then only replace the placeholder we now own. */
+-        if (mach_map_fixed(baseAddr, len, PROT_READ | PROT_WRITE) == MAP_FAILED) {
+-            SetLastError(ERROR_INVALID_ADDRESS);
+-            return NULL;
+-        }
+-        flags |= MAP_FIXED;
+-#else
+-        flags |= MAP_FIXED;
+-#endif
+-    }
+-
+-    void *p = mmap(baseAddr, len, prot, flags, o->fd, off);
+-    if (p == MAP_FAILED) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return NULL; }
+-    if (baseAddr && p != baseAddr) {
+-        /* MAP_FIXED_NOREPLACE hands back a different address instead of
+-         * failing on some kernels; treat that as the refusal it means. */
+-        munmap(p, len);
+-        SetLastError(ERROR_INVALID_ADDRESS);
+-        return NULL;
+-    }
+-    view_register(p, len);
+-    return p;
+-}
+-
+-LPVOID MapViewOfFile(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow, SIZE_T count)
+-{
+-    return MapViewOfFileEx(mapping, access, offHigh, offLow, count, NULL);
+-}
+-
+-BOOL UnmapViewOfFile(LPCVOID baseAddr)
+-{
+-    size_t len = view_take(baseAddr);
+-    if (len == 0) return FALSE;
+-    return munmap((void *)baseAddr, len) == 0;
+-}
+-
+-#endif /* __SWITCH__ */
+ 
+ /* ===================================================================== */
+ /* VirtualQuery                                                           */
+@@ -2638,36 +2023,7 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
+  * honest answer: a host heap pointer is not a Win32 reservation, and the
+  * callers that branch on this want to know which allocator owns the pointer.
+  */
+-SIZE_T VirtualQuery(LPCVOID address, PMEMORY_BASIC_INFORMATION buffer, SIZE_T length)
+-{
+-    if (!buffer || length < sizeof(*buffer)) return 0;
+-    memset(buffer, 0, sizeof(*buffer));
+-
+-    void  *base = NULL;
+-    size_t len  = 0;
+-
+-    if (!view_lookup(address, &base, &len)) {
+-        /* Not ours. Report it free rather than inventing a committed page. */
+-        buffer->BaseAddress    = (PVOID)address;
+-        buffer->AllocationBase = NULL;
+-        buffer->RegionSize     = 0;
+-        buffer->State          = MEM_FREE;
+-        buffer->Protect        = PAGE_NOACCESS;
+-        buffer->Type           = 0;
+-        return sizeof(*buffer);
+-    }
+ 
+-    buffer->BaseAddress      = (PVOID)address;
+-    buffer->AllocationBase   = base;
+-    buffer->AllocationProtect = PAGE_READWRITE;
+-    /* From the queried address to the end of the region, which is what Win32
+-     * reports and what callers sizing a copy out of it depend on. */
+-    buffer->RegionSize       = len - (size_t)((uintptr_t)address - (uintptr_t)base);
+-    buffer->State            = MEM_COMMIT;
+-    buffer->Protect          = PAGE_READWRITE;
+-    buffer->Type             = MEM_PRIVATE;
+-    return sizeof(*buffer);
+-}
+ 
+ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+ {
+@@ -2710,7 +2066,12 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+     b->ullAvailPhys     = avail;
+     b->ullTotalPageFile = b->ullTotalPhys + (ULONGLONG)swap.xsu_total;
+     b->ullAvailPageFile = b->ullAvailPhys + (ULONGLONG)swap.xsu_avail;
+-#else
++#elif defined(NFSU1_PS5)
++    uint64_t total = 0; size_t n = sizeof total;
++    if (sysctlbyname("hw.physmem", &total, &n, NULL, 0)) return FALSE;
++    b->ullTotalPhys = total; b->ullAvailPhys = total / 2;
++    b->ullTotalPageFile = total; b->ullAvailPageFile = total / 2;
++#elif defined(__linux__)
+     struct sysinfo si;
+     if (sysinfo(&si) != 0) return FALSE;
+ 
+diff --git a/xboxrecomp/src/platform/win32_compat.h b/xboxrecomp/src/platform/win32_compat.h
+index 0b4b491..4b06005 100644
+--- a/xboxrecomp/src/platform/win32_compat.h
++++ b/xboxrecomp/src/platform/win32_compat.h
+@@ -574,3 +574,6 @@ static inline MMRESULT waveOutClose(HWAVEOUT h) { (void)h; return MMSYSERR_NOERR
+ 
+ #endif /* !_WIN32 */
+ #endif /* WIN32_COMPAT_H */
++
++HANDLE w32_direct_mapping_handle(void *, void (*)(void *));
++void *w32_direct_mapping_payload(HANDLE);
