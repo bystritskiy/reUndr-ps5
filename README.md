@@ -54,14 +54,14 @@ disc and leaves them as they are.
 <table>
   <tr>
     <td width="50%"><img src="docs/media/menu.jpg" alt="The main menu"><br><sub>The main menu.</sub></td>
-    <td width="50%"><img src="docs/media/controls.jpg" alt="A loading screen with a DualSense diagram and its button labels"><br><sub>A loading screen, with this port's DualSense diagram.</sub></td>
+    <td width="50%"><img src="docs/media/controls.jpg" alt="A loading screen with a DualSense diagram and its button labels"><br><sub>A loading screen.</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/media/start.jpg" alt="The start line of a race with cars and a flag girl"><br><sub>The start of a race.</sub></td>
-    <td width="50%"><img src="docs/media/split.jpg" alt="Split-screen car selection, Player 2 Please Press OPTIONS"><br><sub>Split screen, with PlayStation wording.</sub></td>
+    <td width="50%"><img src="docs/media/split.jpg" alt="Split-screen car selection, Player 2 Please Press OPTIONS"><br><sub>Split screen.</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/media/car.jpg" alt="Car selection with Help and Customize Car prompts"><br><sub>Car selection, with PlayStation prompts.</sub></td>
+    <td width="50%"><img src="docs/media/car.jpg" alt="Car selection with Help and Customize Car prompts"><br><sub>Car selection.</sub></td>
     <td width="50%"><img src="docs/media/paint.jpg" alt="The paint shop"><br><sub>Customize Ride.</sub></td>
   </tr>
 </table>
