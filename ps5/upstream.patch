@@ -1,5 +1,5 @@
 diff --git a/src/main.c b/src/main.c
-index ad4c36c..d05c998 100644
+index ad4c36c..d44c6e0 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -1,5 +1,5 @@
@@ -95,18 +95,18 @@ index ad4c36c..d05c998 100644
      xbox_kernel_init();
      /* text patch: NFSU2 only */
      nfsu1_options_load();
-+    { extern int nv2a_vk_prepare(void); if (!nv2a_vk_prepare()) { fatal("PS5 Vulkan initialization failed. See /data/nfsu1/PPSA99025/stderr.log"); return 1; } }
++    { extern int nv2a_vk_prepare(void); if (!nv2a_vk_prepare()) { fatal("PS5 Vulkan initialization failed. See /data/reUndr/stderr.log"); return 1; } }
      {
          void nfsu1_extras_init(void);    /* nfsu1_extras.c: timer watchdog, R3 */
          nfsu1_extras_init();
      }
 -    xbox_path_init(game_dir, NFSU2_DEFAULT_SAVE_DIR);
-+    xbox_path_init(game_dir, "/data/nfsu1/PPSA99025/save");
++    xbox_path_init(game_dir, "/data/reUndr/save");
      xbox_kernel_bridge_init();
  
      g_esp = XBOX_STACK_TOP;
 diff --git a/src/recomp_manual.c b/src/recomp_manual.c
-index 04dc96a..3dbd2b5 100644
+index 04dc96a..e1aec4c 100644
 --- a/src/recomp_manual.c
 +++ b/src/recomp_manual.c
 @@ -18,6 +18,9 @@
@@ -201,7 +201,7 @@ index 04dc96a..3dbd2b5 100644
  #  define NFSU1_OPTIONS_FILE "sdmc:/switch/nfsu1x/nfsu1x_options.txt"
  #else
 -#  define NFSU1_OPTIONS_FILE "nfsu1x_options.txt"
-+#  define NFSU1_OPTIONS_FILE "/data/nfsu1/PPSA99025/nfsu1x_options.txt"
++#  define NFSU1_OPTIONS_FILE "/data/reUndr/nfsu1x_options.txt"
  #endif
  #define FE_PAD_LEFT     0x9120409Eu
  #define FE_PAD_RIGHT    0xB5971BF1u
@@ -446,7 +446,7 @@ index 04dc96a..3dbd2b5 100644
  static int autoload_find_save(void)
  {
 -    const char *game = getenv("NFSU2_GAME_DIR");
-+    const char *game = "/data/nfsu1/PPSA99025/save";
++    const char *game = "/data/reUndr/save";
      char dir[600], sub[700], path[800];
      struct dirent *u, *s, *f;
      DIR *du, *ds, *df;
@@ -1302,7 +1302,7 @@ index 0000000..67229f7
 +
 +#endif
 diff --git a/xboxrecomp/src/nv2a_vk/nv2a_vk.c b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
-index 773dd12..629f2cd 100644
+index 773dd12..472d5dd 100644
 --- a/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 +++ b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 @@ -29,7 +29,7 @@
@@ -1609,7 +1609,7 @@ index 773dd12..629f2cd 100644
      return "sdmc:/switch/nfsu1x/";
  #else
 -    return "";
-+    return "/data/nfsu1/PPSA99025/";
++    return "/data/reUndr/";
  #endif
  }
  

@@ -89,9 +89,9 @@ static int unpack_image_in(const char *dir,const char *target) {
 }
 static int unpack_image(const char *target) {
  char dir[64];
- if(unpack_image_in("/data/nfsu1",target))return 1;
+ if(unpack_image_in("/data/reUndr",target))return 1;
  for(int i=0;i<8;i++) {
-  snprintf(dir,sizeof dir,"/mnt/usb%d/nfsu1",i);if(unpack_image_in(dir,target))return 1;
+  snprintf(dir,sizeof dir,"/mnt/usb%d/reUndr",i);if(unpack_image_in(dir,target))return 1;
   snprintf(dir,sizeof dir,"/mnt/usb%d",i);if(unpack_image_in(dir,target))return 1;
  }
  return 0;
@@ -110,17 +110,17 @@ __attribute__((noreturn)) static void no_game(void) {
   {260,7,ACCENT,"Game not found"},
   {380,4,0,"reUndr runs your own copy of the original Xbox game."},
   {450,4,0,"Copy your disc image (.iso) to one of these places:"},
-  {520,4,ACCENT,"/data/nfsu1/"},
-  {570,4,ACCENT,"/mnt/usb0/nfsu1/  or  /mnt/usb0/   (usb0 to usb7)"},
+  {520,4,ACCENT,"/data/reUndr/"},
+  {570,4,ACCENT,"/mnt/usb0/reUndr/  or  /mnt/usb0/   (usb0 to usb7)"},
   {650,4,0,"Or copy the unpacked disc to this folder:"},
-  {700,4,ACCENT,"/data/nfsu1/game/"},
+  {700,4,ACCENT,"/data/reUndr/game/"},
   {860,4,0,"Then start reUndr again. Press Cross to close."}};
  const Nfsu1ScreenLine *lines=missing;unsigned count=sizeof missing/sizeof *missing;
- const char *note="game files not found. Copy your disc image (.iso) to /data/nfsu1. See README.txt.";
+ const char *note="game files not found. Copy your disc image (.iso) to /data/reUndr. See README.txt.";
  if(image_error==NFSU1_IMAGE_DAMAGED) { lines=damaged;count=sizeof damaged/sizeof *damaged;note="the disc image is damaged. See README.txt."; }
  else if(image_error==NFSU1_IMAGE_WRITE) { lines=no_room;count=sizeof no_room/sizeof *no_room;note="no room for the game: it needs 1.6 GB. See README.txt."; }
  notify(note);
- sceKernelDebugOutText(0,"[NFSU1] Missing game. Expected /app0/game or /data/nfsu1/game\n");
+ sceKernelDebugOutText(0,"[NFSU1] Missing game. Expected /app0/game or /data/reUndr/game\n");
  fprintf(stderr,"Missing Xbox disc: no default.xbe with the game folders\n");fflush(stderr);
  if(nfsu1_screen_show(lines,count,-1)==0) {
   while(!nfsu1_movie_skip_down())sceKernelUsleep(50000);
@@ -149,7 +149,7 @@ static FILE *open_log(const char *path,int *fd_out) {
  return fdopen(fd,"w");
 }
 static void load_settings(void) {
- FILE *f=fopen("/data/nfsu1/PPSA99025/nfsu1_env.txt","r");if(!f)return;
+ FILE *f=fopen("/data/reUndr/nfsu1_env.txt","r");if(!f)return;
  char line[512];
  while(fgets(line,sizeof line,f)) { char *key=line;while(*key==' '||*key=='\t')key++;
    if(*key=='#'||*key=='\n')continue;char *eq=strchr(key,'=');if(!eq)continue;*eq++=0;
@@ -157,13 +157,36 @@ static void load_settings(void) {
    while(*eq==' '||*eq=='\t')eq++;eq[strcspn(eq,"\r\n")]=0;if(*key)setenv(key,eq,1);
  }fclose(f);
 }
+/* 01.001.000 kept the disc in /data/nfsu1 and the rest in /data/nfsu1/PPSA99025.
+   Moves what is not in /data/reUndr yet, then drops the old logs and empty folders. */
+static void move_old_data(void) {
+ static const char *const kept[]={"save","ui","nfsu1_env.txt","nfsu1x_options.txt",
+  "vkspirv.bin","progcache.bin","vkpipes.bin","vkpipecache.bin"};
+ char from[512],to[512];struct stat st;
+ for(unsigned i=0;i<sizeof kept/sizeof *kept;i++) {
+  snprintf(from,sizeof from,"/data/nfsu1/PPSA99025/%s",kept[i]);snprintf(to,sizeof to,"/data/reUndr/%s",kept[i]);
+  if(stat(to,&st))rename(from,to);
+ }
+ unlink("/data/nfsu1/PPSA99025/stdout.log");unlink("/data/nfsu1/PPSA99025/stderr.log");
+ rmdir("/data/nfsu1/PPSA99025");
+ DIR *d=opendir("/data/nfsu1");
+ if(!d)return;
+ for(struct dirent *e;(e=readdir(d));) {
+  size_t length=strlen(e->d_name);
+  if(e->d_name[0]=='.'||(strcmp(e->d_name,"game")&&strcmp(e->d_name,"hd")
+    &&(length<5||strcasecmp(e->d_name+length-4,".iso"))))continue;
+  snprintf(from,sizeof from,"/data/nfsu1/%s",e->d_name);snprintf(to,sizeof to,"/data/reUndr/%s",e->d_name);
+  if(stat(to,&st))rename(from,to);
+ }
+ closedir(d);rmdir("/data/nfsu1");
+}
 int main(int argc,char **argv) {
  (void)argc;(void)argv;
  scePthreadSetaffinity((unsigned long)pthread_self(),0x1fff);
- mkdir("/data/nfsu1",0777);mkdir("/data/nfsu1/PPSA99025",0777);
- mkdir("/data/nfsu1/PPSA99025/save",0777);
- chmod("/data/nfsu1",0777);chmod("/data/nfsu1/PPSA99025",0777);
- FILE *out=open_log("/data/nfsu1/PPSA99025/stdout.log",NULL),*err=open_log("/data/nfsu1/PPSA99025/stderr.log",&g_crash_log_fd);
+ mkdir("/data/reUndr",0777);chmod("/data/reUndr",0777);
+ move_old_data();
+ mkdir("/data/reUndr/save",0777);
+ FILE *out=open_log("/data/reUndr/stdout.log",NULL),*err=open_log("/data/reUndr/stderr.log",&g_crash_log_fd);
  if(!out||!err)return 1;stdout=out;stderr=err;load_settings();
  sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.001.000\n");
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"offscreen");
@@ -177,19 +200,19 @@ int main(int argc,char **argv) {
  { unsigned other=0;pthread_t t;if(!pthread_create(&t,NULL,tls_probe,&other))pthread_join(t,NULL);
    fprintf(stderr,"[TLS] native: main fp_cw=0x%x thread fp_cw=0x%x (want 0x37f)\n",g_fp_control_word,other);fflush(stderr); }
  char dir[1024]="/app0/game";
- if(!valid(dir))snprintf(dir,sizeof dir,"/data/nfsu1/game");
+ if(!valid(dir))snprintf(dir,sizeof dir,"/data/reUndr/game");
  if(!valid(dir)) {
    int found=0;
-   for(int i=0;i<8&&!found;i++) { snprintf(dir,sizeof dir,"/mnt/usb%d/nfsu1/game",i);found=valid(dir); }
-   if(!found&&unpack_image("/data/nfsu1/game")) { snprintf(dir,sizeof dir,"/data/nfsu1/game");found=valid(dir); }
+   for(int i=0;i<8&&!found;i++) { snprintf(dir,sizeof dir,"/mnt/usb%d/reUndr/game",i);found=valid(dir); }
+   if(!found&&unpack_image("/data/reUndr/game")) { snprintf(dir,sizeof dir,"/data/reUndr/game");found=valid(dir); }
    if(!found)no_game();
    nfsu1_screen_close();
  }
  { char xbe[1100];snprintf(xbe,sizeof xbe,"%s/default.xbe",dir);log_xbe(xbe); }
  setenv("NFSU2_GAME_DIR",dir,1);
  /* A disc built into the app already has its text changed. */
- if(strcmp(dir,"/app0/game")) { mkdir("/data/nfsu1/PPSA99025/ui",0777);nfsu1_ui_text_prepare(dir,"/data/nfsu1/PPSA99025/ui"); }
- /* HD packs sit beside the game: /data/nfsu1/hd, /mnt/usbN/nfsu1/hd. */
+ if(strcmp(dir,"/app0/game")) { mkdir("/data/reUndr/ui",0777);nfsu1_ui_text_prepare(dir,"/data/reUndr/ui"); }
+ /* HD packs sit beside the game: /data/reUndr/hd, /mnt/usbN/reUndr/hd. */
  char hd[1024];snprintf(hd,sizeof hd,"%.*shd",(int)strlen(dir)-4,dir);setenv("NFSU1_HD_DIR",hd,0);
  sceSystemServiceHideSplashScreen();
  pthread_attr_t attr;pthread_t th;void *rc=NULL;
