@@ -47,6 +47,9 @@ disc and leaves them as they are.
   disc but sharp at 4K, and Arial as Liberation Sans.
 - **DualSense throughout.** Cross, Circle, Square and Triangle in the prompts, PlayStation wording
   in the text, and a DualSense diagram on the loading screens.
+- **Surround sound.** Cars and effects keep the game's own 5.1 positions on a surround system,
+  and All Speakers spreads music and menus over every speaker too. Stereo still works.
+- **Longer view.** Cars and scenery keep their detail up to 8x farther away.
 - **Two players.** Split screen on one console with two DualSense controllers.
 - **Disc image install.** Copy your `.iso` to the console and start the app, it does the rest.
 - **Optional HD logos and icons,** made on your computer from your own disc.
@@ -74,9 +77,9 @@ pack, which sharpens the logos and icons. The game content in them belongs to it
 - A **PS5 that runs homebrew**, with [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus)
   and an FTP server.
 - Your own **USA (NTSC-U) Xbox disc** of *Need for Speed: Underground*, backed up by you as a disc
-  image (`.iso`) or as files. Its `default.xbe` has SHA-256
-  `cdd562ffcc70906b3fecd841db4dc10fd463664b05e03f896a8fb38b9a7d878a`. Recompiled code fits one
-  executable, so another release is refused.
+  image (`.iso`) or as files. A clean dump and one with a region or media patch both work. The code
+  is recompiled from this release, so a PAL or other release may not run; `stderr.log` then says
+  which `default.xbe` it found.
 - About **1.6 GB free** on the console.
 
 ## Install
@@ -91,8 +94,7 @@ pack, which sharpens the logos and icons. The game content in them belongs to it
 
 <p align="center"><img src="docs/media/unpack.jpg" alt="The first-start screen: Unpacking your disc image, 23%" width="60%"></p>
 
-If the disc is missing or is another release, the app says so on screen and tells you where
-things go.
+If the disc is missing, the app says so on screen and tells you where things go.
 
 **Already have the files?** Copy them to `/data/nfsu1/game`, or to `nfsu1/game` on a USB drive
 (`/mnt/usb0/nfsu1/game` to `/mnt/usb7/nfsu1/game`), so that `default.xbe` sits next to `CARS`,
@@ -134,8 +136,9 @@ merges two controllers into one, doesn't add a player.
 
 ## Settings
 
-Options → Camera has render scale, FXAA, filtering and reflections, and what you save there wins
-over the file below.
+Options → Port Settings (Camera in the original game) has render scale, FXAA, filtering,
+reflections, LOD distance (8x by default), All Speakers (on by default) and a speaker test that
+plays a tone from one speaker at a time. What you save there wins over the file below.
 
 `/data/nfsu1/PPSA99025/nfsu1_env.txt` is optional and holds `KEY=VALUE` lines read at start:
 
@@ -147,6 +150,8 @@ over the file below.
 | `RECOMP_VK_ANISO` | 16 | anisotropic filtering |
 | `RECOMP_VK_FXAA` | 1 | FXAA |
 | `RECOMP_AUDIO_VOLUME` | | volume |
+| `NFSU1_AUDIO_CHANNELS` | 8 | 2 sends stereo only |
+| `NFSU1_LOD_SCALE` | 8 | LOD distance when none is saved: 1 to 8 |
 | `RECOMP_FPS_LOG` | 0 | fps in the log every 10 seconds |
 | `NFSU1_HD` | 1 | 0 turns the HD textures off, and the PlayStation prompts with them |
 

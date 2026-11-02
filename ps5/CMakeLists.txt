@@ -28,7 +28,7 @@ list(TRANSFORM runtime PREPEND "${RT}/")
 add_library(nfsu1_runtime STATIC ${runtime})
 add_library(nfsu1_game STATIC "${ROOT}/upstream/src/main.c" "${ROOT}/upstream/src/recomp_manual.c"
  "${ROOT}/upstream/src/nfsu1_extras.c" ${generated})
-add_library(nfsu1_host STATIC src/memory_ps5.c src/input_ps5.c src/pad_map.c src/audio_ps5.c src/sha256.c src/hd_textures.c src/fmv_replace.c src/fmv_video.c src/disc_image.c src/ui_text.c src/screen_ps5.c)
+add_library(nfsu1_host STATIC src/memory_ps5.c src/input_ps5.c src/pad_map.c src/audio_ps5.c src/audio_native.c src/port_ui.c src/sha256.c src/xbe_check.c src/hd_textures.c src/fmv_replace.c src/fmv_video.c src/disc_image.c src/ui_text.c src/screen_ps5.c)
 add_library(nfsu1_start OBJECT src/native_start.c src/main_ps5.c "${ROOT}/build/vulkan_shim.c")
 foreach(t nfsu1_runtime nfsu1_game nfsu1_host nfsu1_start)
  target_compile_definitions(${t} PRIVATE NFSU1_PS5=1 NFSU1_PS5_DIRECT_MEMORY=1 NFSU2_VULKAN=1)

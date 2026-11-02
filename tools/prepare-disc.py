@@ -84,7 +84,7 @@ def build(game, target, with_imagegen):
     if not (game/'default.xbe').is_file():
         raise SystemExit(f'No default.xbe in {game}')
     if digest(game/'default.xbe').upper() != expected:
-        raise SystemExit('This is not the supported NTSC-U Xbox release')
+        print('Note: default.xbe differs from the pinned NTSC-U file; the HD pack only needs the disc textures.')
     missing = [x for x in FOLDERS if not (game/x).is_dir()]
     if missing:
         raise SystemExit('Missing disc folders: '+', '.join(missing))

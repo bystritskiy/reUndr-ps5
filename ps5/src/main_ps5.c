@@ -2,6 +2,7 @@
 #include "platform/win32_compat.h"
 #include "sha256.h"
 #include "game_revision.h"
+#include "xbe_check.h"
 #include "disc_image.h"
 #include "ui_text.h"
 #include "screen_ps5.h"
@@ -23,24 +24,24 @@ extern int scePthreadSetaffinity(unsigned long,unsigned long);
 extern int sceKernelSendNotificationRequest(int,void *,size_t,int);
 extern int sceKernelUsleep(unsigned);
 extern int nfsu1_movie_skip_down(void);
-static int wrong_revision;
 static void notify(const char *text) {
  struct { char reserved[45];char message[3075]; } note;memset(&note,0,sizeof note);
  snprintf(note.message,sizeof note.message,"reUndr: %s",text);sceKernelSendNotificationRequest(0,&note,sizeof note,0);
 }
 static void *game(void *unused) { (void)unused;return (void *)(intptr_t)nfsu1_game_main(0,NULL); }
+/* Any default.xbe is run; the log says whether it is the build the port was made from. */
+static void log_xbe(const char *path) {
+ static const Nfsu1XbeSection ref[]=NFSU1_XBE_SECTIONS;char sha[65];
+ int known=nfsu1_xbe_check(path,NFSU1_XBE_SHA256,ref,sizeof ref/sizeof *ref,sha);
+ fprintf(stderr,"[XBE] %s SHA-256 %s: %s\n",path,sha[0]?sha:"unreadable",known?"supported NTSC-U build":"other build, may not work");
+}
 static int valid(const char *dir) {
- char path[1024],sha[65];struct stat st;
+ char path[1024];struct stat st;
  snprintf(path,sizeof path,"%s/default.xbe",dir);
- if(stat(path,&st))return 0;
- if(!nfsu1_sha256_file(path,sha)||strcmp(sha,NFSU1_XBE_SHA256)) { wrong_revision=1;return 0; }
+ if(stat(path,&st)||!S_ISREG(st.st_mode))return 0;
  const char *parts[]={"CARS","TRACKS","FRONTEND","GLOBAL","SOUND","MOVIES","LANGUAGES","MEMCARD"};
  for(unsigned i=0;i<sizeof parts/sizeof *parts;i++) { snprintf(path,sizeof path,"%s/%s",dir,parts[i]); if(stat(path,&st)||!S_ISDIR(st.st_mode))return 0; }
  return 1;
-}
-static int right_xbe(const char *path) {
- char sha[65];
- return nfsu1_sha256_file(path,sha)&&!strcmp(sha,NFSU1_XBE_SHA256);
 }
 static void remove_tree(const char *path) {
  DIR *d=opendir(path);
@@ -71,13 +72,12 @@ static int unpack_image_in(const char *dir,const char *target) {
   if(length<5||strcasecmp(e->d_name+length-4,".iso")||e->d_name[0]=='.')continue;
   snprintf(image,sizeof image,"%s/%s",dir,e->d_name);
   remove_tree(part);
-  int result=nfsu1_image_extract(image,part,right_xbe,unpack_progress);
+  int result=nfsu1_image_extract(image,part,NULL,unpack_progress);
   if(result==NFSU1_IMAGE_OK) {
    if(rename(part,target))result=NFSU1_IMAGE_WRITE;
    else unpacked=1;
   }
-  if(result==NFSU1_IMAGE_WRONG_DISC)wrong_revision=1;
-  else if(result==NFSU1_IMAGE_DAMAGED||result==NFSU1_IMAGE_WRITE)image_error=result;
+  if(result==NFSU1_IMAGE_DAMAGED||result==NFSU1_IMAGE_WRITE)image_error=result;
   fprintf(stderr,"[IMAGE] %s: %d\n",image,result);
  }
  closedir(d);remove_tree(part);
@@ -102,12 +102,6 @@ __attribute__((noreturn)) static void no_game(void) {
   {260,7,ACCENT,"Not enough free space"},
   {380,4,0,"The game needs about 1.6 GB free on the console."},
   {860,4,0,"Press Cross to close."}};
- static const Nfsu1ScreenLine other_disc[]={
-  {260,7,ACCENT,"This disc is not supported"},
-  {380,4,0,"reUndr runs only the NTSC-U Xbox release of the game."},
-  {440,4,0,"Its default.xbe has this SHA-256:"},
-  {510,3,ACCENT,NFSU1_XBE_SHA256},
-  {860,4,0,"Press Cross to close."}};
  static const Nfsu1ScreenLine missing[]={
   {260,7,ACCENT,"Game not found"},
   {380,4,0,"reUndr runs your own copy of the original Xbox game."},
@@ -121,10 +115,9 @@ __attribute__((noreturn)) static void no_game(void) {
  const char *note="game files not found. Copy your disc image (.iso) to /data/nfsu1. See README.txt.";
  if(image_error==NFSU1_IMAGE_DAMAGED) { lines=damaged;count=sizeof damaged/sizeof *damaged;note="the disc image is damaged. See README.txt."; }
  else if(image_error==NFSU1_IMAGE_WRITE) { lines=no_room;count=sizeof no_room/sizeof *no_room;note="no room for the game: it needs 1.6 GB. See README.txt."; }
- else if(wrong_revision) { lines=other_disc;count=sizeof other_disc/sizeof *other_disc;note="this disc is not the supported NTSC-U Xbox release. See README.txt."; }
  notify(note);
- sceKernelDebugOutText(0,"[NFSU1] Missing or incompatible game. Expected /app0/game or /data/nfsu1/game\n");
- fprintf(stderr,"Missing compatible Xbox disc. XBE SHA256: %s\n",NFSU1_XBE_SHA256);fflush(stderr);
+ sceKernelDebugOutText(0,"[NFSU1] Missing game. Expected /app0/game or /data/nfsu1/game\n");
+ fprintf(stderr,"Missing Xbox disc: no default.xbe with the game folders\n");fflush(stderr);
  if(nfsu1_screen_show(lines,count,-1)==0) {
   while(!nfsu1_movie_skip_down())sceKernelUsleep(50000);
  }
@@ -167,7 +160,7 @@ int main(int argc,char **argv) {
  chmod("/data/nfsu1",0777);chmod("/data/nfsu1/PPSA99025",0777);
  FILE *out=open_log("/data/nfsu1/PPSA99025/stdout.log"),*err=open_log("/data/nfsu1/PPSA99025/stderr.log");
  if(!out||!err)return 1;stdout=out;stderr=err;load_settings();
- sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.000.000\n");
+ sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.001.000\n");
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"offscreen");
  setenv("RECOMP_GIL_EAGER","1",0);setenv("RECOMP_CULL","0",0);
  setenv("RECOMP_GL_SCALE","4.5",0);setenv("RECOMP_VK_HEADLESS","0",1);
@@ -183,6 +176,7 @@ int main(int argc,char **argv) {
    if(!found)no_game();
    nfsu1_screen_close();
  }
+ { char xbe[1100];snprintf(xbe,sizeof xbe,"%s/default.xbe",dir);log_xbe(xbe); }
  setenv("NFSU2_GAME_DIR",dir,1);
  /* A disc built into the app already has its text changed. */
  if(strcmp(dir,"/app0/game")) { mkdir("/data/nfsu1/PPSA99025/ui",0777);nfsu1_ui_text_prepare(dir,"/data/nfsu1/PPSA99025/ui"); }

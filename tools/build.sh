@@ -15,4 +15,4 @@ docker image inspect reundr-ps5-builder:local >/dev/null 2>&1 || docker build -t
 # Same absolute host path inside Docker also resolves CMake's object paths.
 docker run --rm -v "$root:$root" -w "$root" reundr-ps5-builder:local bash tools/link.sh
 n=build/deps/PS5_Vulkan/tooling/native
-"$llvm/clang++" -std=c++20 -O2 "$n/native_app_builder.cpp" "$n/self_container.cpp" "$n/elf_object.cpp" "$n/sce_module_writer.cpp" -lz -o build/ps5-native-tool
+python3 tools/build-native-tool.py

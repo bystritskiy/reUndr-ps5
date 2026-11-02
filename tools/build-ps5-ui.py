@@ -228,6 +228,11 @@ def main():
             replacement = re.sub(r'\bSTART\b','OPTIONS',text)
         if name in ('XBOX_CONTROLLER_UNPLUGGED','PSX2_CONTROLLER_UNPLUGGED','GAMECUBE_CONTROLLER_UNPLUGGED','MU_OPTIONS_CONTROLLER_PLUGIN') or name.startswith(('WARNING_PLUGIN_PORT_','WARNING_USE_PORT_')):
             replacement = 'Reconnect your DualSense^wireless controller.^Press PS, then OPTIONS^to continue.'
+        # Options > Camera also holds the port's own settings.
+        if name in ('MU_PAUSE_CAMERA','OPTIONS_DESC_CAMERA'):
+            replacement = 'Port Settings'
+        if name == 'MU_CAMERA':
+            replacement = 'PORT SETTINGS'
         if replacement != text:
             report['changes'].append({'file':'LANGUAGES/LANGUAGE_ENGLISH.bin','label':name,'hash':f'{key:08X}','before':text,'after':replacement})
         updated.append((key,replacement))

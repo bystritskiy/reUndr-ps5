@@ -2,8 +2,8 @@ reUndr: an unofficial native PS5 port of Need for Speed: Underground (Xbox)
 
 This package holds no game files. You need your own copy of the game: the NTSC-U
 Xbox release, as a disc image (.iso) you made from your disc or as unpacked files.
-reUndr checks default.xbe and accepts only that release. It is not affiliated with
-or endorsed by Electronic Arts or Sony.
+A clean dump and a region or media patched one both work; other releases may not.
+It is not affiliated with or endorsed by Electronic Arts or Sony.
 
 INSTALL
 
@@ -20,7 +20,7 @@ nfsu1/game on a USB drive (/mnt/usb0/nfsu1/game to /mnt/usb7/nfsu1/game). The
 folder must hold default.xbe next to CARS, TRACKS, FRONTEND, GLOBAL, SOUND, MOVIES,
 LANGUAGES and MEMCARD.
 
-If no disc is found, or it is another release, the app says so on screen.
+If no disc is found, the app says so on screen.
 
 HD LOGOS AND ICONS (OPTIONAL)
 
@@ -40,5 +40,12 @@ CONTROLS
 Cross/Circle/Square/Triangle = A/B/X/Y, R1/L1 = Black/White, L2/R2 = triggers,
 Options = Start, touchpad press = Back, L3/R3 = stick presses. For a second player,
 sign in a second local user (a guest will do); assist mode does not add a player.
+
+SOUND AND DETAIL
+
+reUndr plays the game's 5.1 mix on a surround system and falls back to stereo by
+itself. Options > Port Settings has All Speakers (music and menus on every
+speaker, on by default), Speaker Test (one speaker at a time; set it back to
+Off) and LOD Distance (8x by default).
 
 Settings, saves and logs are in /data/nfsu1/PPSA99025/. Licences are in licenses/.
