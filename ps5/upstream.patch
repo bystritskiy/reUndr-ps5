@@ -106,7 +106,7 @@ index ad4c36c..d44c6e0 100644
  
      g_esp = XBOX_STACK_TOP;
 diff --git a/src/recomp_manual.c b/src/recomp_manual.c
-index 04dc96a..e1aec4c 100644
+index 04dc96a..5310746 100644
 --- a/src/recomp_manual.c
 +++ b/src/recomp_manual.c
 @@ -18,6 +18,9 @@
@@ -275,12 +275,14 @@ index 04dc96a..e1aec4c 100644
      if (f) {
          while (fgets(line, sizeof line, f)) {
              if (!strncmp(line, "reflections=", 12))
-@@ -747,9 +808,17 @@ void nfsu1_options_load(void)
+@@ -747,9 +808,19 @@ void nfsu1_options_load(void)
                      if (s_aniso_lvl[i] == a)
                          s_aniso_idx = i;
              }
 +#ifdef NFSU1_PS5
 +            else if (!strncmp(line,"audio_spread=",13)) s_audio_spread=line[13]!='0';
++            else if (!strncmp(line,"text_lang=",10)) nfsu1_port_lang_choose(0,line[10]=='1',1);
++            else if (!strncmp(line,"voice_lang=",11)) nfsu1_port_lang_choose(1,line[11]=='1',1);
 +#endif
 +            else if (!strncmp(line, "lod=", 4)) {
 +                int pct = atoi(line + 4);
@@ -294,7 +296,7 @@ index 04dc96a..e1aec4c 100644
                      if (s_scale_pct[i] == pct) {
                          s_scale_idx = i;
                          s_scale_saved = 1;
-@@ -758,6 +827,10 @@ void nfsu1_options_load(void)
+@@ -758,6 +829,10 @@ void nfsu1_options_load(void)
          }
          fclose(f);
      }
@@ -305,7 +307,7 @@ index 04dc96a..e1aec4c 100644
      refl_changed();
  #ifdef NFSU2_VULKAN
      {
-@@ -766,7 +839,7 @@ void nfsu1_options_load(void)
+@@ -766,7 +841,7 @@ void nfsu1_options_load(void)
              /* RECOMP_GL_SCALE stays in charge until the option is changed;
               * the row shows the nearest step. */
              double k = strtod(e, NULL), best = 1e9;
@@ -314,7 +316,7 @@ index 04dc96a..e1aec4c 100644
                  double d = fabs(k * 100.0 - s_scale_pct[i]);
                  if (d < best) { best = d; s_scale_idx = i; }
              }
-@@ -786,7 +859,10 @@ static void options_save(void)
+@@ -786,7 +861,14 @@ static void options_save(void)
          fprintf(stderr, "[options] cannot write " NFSU1_OPTIONS_FILE "\n");
          return;
      }
@@ -322,11 +324,15 @@ index 04dc96a..e1aec4c 100644
 +    fprintf(f, "reflections=%d\nlod=%d\n", s_refl, s_lod_pct[s_lod_idx]);
 +#ifdef NFSU1_PS5
 +    fprintf(f,"audio_spread=%d\n",s_audio_spread);
++    for(int i=0;i<nfsu1_port_lang_count();i++){
++        int k=nfsu1_port_lang_kind(i);
++        fprintf(f,"%s_lang=%d\n",k?"voice":"text",nfsu1_port_lang_choice(k));
++    }
 +#endif
      if (s_scale_saved)
          fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
  #ifdef NFSU2_VULKAN
-@@ -798,22 +874,22 @@ static void options_save(void)
+@@ -798,22 +880,22 @@ static void options_save(void)
  /* Our texts in guest memory, each copied once. */
  static uint32_t guest_str(const char *s)
  {
@@ -354,7 +360,7 @@ index 04dc96a..e1aec4c 100644
          return 0;
      memcpy((void *)XBOX_PTR(pool + used), s, n);
      cache[i].s = s;
-@@ -825,6 +901,9 @@ static uint32_t guest_str(const char *s)
+@@ -825,6 +907,9 @@ static uint32_t guest_str(const char *s)
  /* sub_000DD490(package, object name, text), cdecl. */
  static void fe_set_text(uint32_t screen, const char *object, const char *text)
  {
@@ -364,12 +370,12 @@ index 04dc96a..e1aec4c 100644
      uint32_t name = guest_str(object), str = guest_str(text);
  
      if (!name || !str)
-@@ -835,13 +914,28 @@ static void fe_set_text(uint32_t screen, const char *object, const char *text)
+@@ -835,13 +920,28 @@ static void fe_set_text(uint32_t screen, const char *object, const char *text)
      PUSH32(esp, ROW_HANDLER_VA);
      sub_000DD490();
      esp += 12;
 +#ifdef NFSU1_PS5
-+    if(nfsu1_port_ui_custom()) {
++    if(nfsu1_port_ui_custom()||nfsu1_port_lang_count()) {
 +        /* The narrow setter zero-extends bytes (sub_E9300). FNTX records of
 +         * non-ASCII bytes are sign-extended, as in LANGUAGE_ENGLISH.bin. */
 +        PUSH32(esp,name);PUSH32(esp,ROW_HANDLER_VA);sub_000E2CD0();esp+=4;
@@ -395,7 +401,7 @@ index 04dc96a..e1aec4c 100644
  };
  
  static void opt_row_text(uint32_t screen, int i)
-@@ -850,6 +944,33 @@ static void opt_row_text(uint32_t screen, int i)
+@@ -850,6 +950,33 @@ static void opt_row_text(uint32_t screen, int i)
      fe_set_text(screen, s_data_obj[i], s_rows[i].texts[*s_rows[i].value]);
  }
  
@@ -429,7 +435,49 @@ index 04dc96a..e1aec4c 100644
  /* Camera setup (thiscall, ecx = options screen, ret): the game's two rows,
   * then ours. */
  void sub_000C2A70(void)
-@@ -910,6 +1031,11 @@ static void opt_row_input_1(void) { opt_row_input(1); }
+@@ -876,6 +1003,22 @@ void sub_000C2A70(void)
+     }
+ }
+ 
++/* The arrow sound of a left/right message. */
++static void row_arrow_sound(uint32_t screen, uint32_t msg)
++{
++    PUSH32(esp, 0xBu);
++    PUSH32(esp, 0xAu);
++    PUSH32(esp, msg);
++    PUSH32(esp, ROW_HANDLER_VA);
++    sub_000DDDE0();
++    esp += 12;
++    PUSH32(esp, eax);
++    PUSH32(esp, MEM32(screen + 0xCu));
++    PUSH32(esp, ROW_HANDLER_VA);
++    sub_000DDD60();
++    esp += 8;
++}
++
+ /* Row input (thiscall, the message, ret 4), as sub_000C0C90: left/right
+  * step the value (wrapping), then the texts and the arrow sound. */
+ static void opt_row_input(int i)
+@@ -889,17 +1032,7 @@ static void opt_row_input(int i)
+         options_save();
+         options_log();
+         opt_row_text(screen, i);
+-        PUSH32(esp, 0xBu);
+-        PUSH32(esp, 0xAu);
+-        PUSH32(esp, msg);
+-        PUSH32(esp, ROW_HANDLER_VA);
+-        sub_000DDDE0();
+-        esp += 12;
+-        PUSH32(esp, eax);
+-        PUSH32(esp, MEM32(screen + 0xCu));
+-        PUSH32(esp, ROW_HANDLER_VA);
+-        sub_000DDD60();
+-        esp += 8;
++        row_arrow_sound(screen, msg);
+     }
+     esp += 8;
+ }
+@@ -910,6 +1043,95 @@ static void opt_row_input_1(void) { opt_row_input(1); }
  static void opt_row_input_2(void) { opt_row_input(2); }
  static void opt_row_input_3(void) { opt_row_input(3); }
  static void opt_row_input_4(void) { opt_row_input(4); }
@@ -438,10 +486,94 @@ index 04dc96a..e1aec4c 100644
 +static void opt_row_input_6(void) { opt_row_input(6); }
 +static void opt_row_input_7(void) { opt_row_input(7); }
 +#endif
++#endif
++
++#ifdef NFSU1_PS5
++/* Options -> Trailers (screen 10, setup sub_000C2E70) is the language screen
++ * when the game folder has lang/lang.txt (port_ui.c): one row per language
++ * kind, the camera rows' way, handlers after theirs in the int3 padding, and
++ * a last row that only says a choice applies at the next start. The game's
++ * own language change, sub_00159660, reads the file only once more: its
++ * later calls open nothing. The title stays the trailers' own MU_TRAILERS
++ * text. */
++#define LANG_HANDLER_VA (ROW_HANDLER_VA + (uint32_t)N_ROWS)
++_Static_assert(N_ROWS + 2 <= 0xC0C90 - 0xC0C83, "row handlers past the int3 padding");
++extern void sub_000C2E70_gen(void);
++static const char *const s_lang_label[] = { "Text:", "Voice:" };
++static const char *const s_lang_name_obj[] = { "OptionName_1", "OptionName_2", "OptionName_3" };
++static const char *const s_lang_data_obj[] = { "OptionData_1", "OptionData_2", "OptionData_3" };
++
++static void lang_row_text(uint32_t screen, int i)
++{
++    int kind = nfsu1_port_lang_kind(i);
++    fe_set_text(screen, s_lang_name_obj[i], s_lang_label[kind]);
++    fe_set_text(screen, s_lang_data_obj[i], nfsu1_port_lang_name(kind, nfsu1_port_lang_choice(kind)));
++}
++
++static void lang_row_input(int i)
++{
++    uint32_t screen = ecx, msg = MEM32(esp + 4);
++    int kind = nfsu1_port_lang_kind(i);
++
++    if (msg == FE_PAD_LEFT || msg == FE_PAD_RIGHT) {
++        nfsu1_port_lang_choose(kind, !nfsu1_port_lang_choice(kind), 0);
++        options_save();
++        fprintf(stderr, "[options] %s language: %s from the next start\n", kind ? "voice" : "text",
++                nfsu1_port_lang_choice(kind) ? "second" : "first");
++        lang_row_text(screen, i);
++        row_arrow_sound(screen, msg);
++    }
++    esp += 8;
++}
++
++static void lang_row_input_0(void) { lang_row_input(0); }
++static void lang_row_input_1(void) { lang_row_input(1); }
++
++/* Trailers setup (thiscall, ecx = options screen, ret). */
++void sub_000C2E70(void)
++{
++    uint32_t screen = ecx;
++    int i, n = nfsu1_port_lang_count();
++
++    if (!n) {
++        sub_000C2E70_gen();
++        return;
++    }
++    PUSH32(esp, 0x4853C106u);               /* MU_TRAILERS */
++    PUSH32(esp, ROW_HANDLER_VA);
++    sub_00159440();
++    PUSH32(esp, eax);
++    PUSH32(esp, 0xF3C04E76u);               /* the title object */
++    PUSH32(esp, MEM32(screen + 0xCu));
++    PUSH32(esp, ROW_HANDLER_VA);
++    sub_000DC490();
++    esp += 16;
++    for (i = 0; i <= n; i++) {
++        int row = 1 + i;
++        PUSH32(esp, 0);                     /* no select button */
++        PUSH32(esp, i < n);                 /* value text */
++        PUSH32(esp, (uint32_t)row);
++        ecx = screen;
++        PUSH32(esp, ROW_HANDLER_VA);
++        sub_000C1D30();                     /* thiscall, pops its 3 */
++        if (i == n) {
++            fe_set_text(screen, s_lang_name_obj[i], "Applies after a restart.");
++            break;
++        }
++        PUSH32(esp, 0);                     /* arrows, not -/+ */
++        PUSH32(esp, (uint32_t)row);
++        ecx = screen;
++        PUSH32(esp, ROW_HANDLER_VA);
++        sub_000C1E10();                     /* thiscall, pops its 2 */
++        MEM32(screen + 0x3Cu + 4u * (uint32_t)i) = LANG_HANDLER_VA + (uint32_t)i;
++        lang_row_text(screen, i);
++    }
++    esp += 4;                               /* ret */
++}
  #endif
  
  /* Race render (cdecl, no arguments): cube-face views off for the call. */
-@@ -1074,7 +1200,7 @@ static char s_al_name[32];              /* newest save's profile */
+@@ -1074,7 +1296,7 @@ static char s_al_name[32];              /* newest save's profile */
   * many there are. */
  static int autoload_find_save(void)
  {
@@ -450,7 +582,7 @@ index 04dc96a..e1aec4c 100644
      char dir[600], sub[700], path[800];
      struct dirent *u, *s, *f;
      DIR *du, *ds, *df;
-@@ -1089,7 +1215,7 @@ static int autoload_find_save(void)
+@@ -1089,7 +1311,7 @@ static int autoload_find_save(void)
      if (!(du = opendir(game)))
          return 0;
      while ((u = readdir(du))) {                 /* UDATA, any case */
@@ -459,7 +591,7 @@ index 04dc96a..e1aec4c 100644
              continue;
          snprintf(dir, sizeof dir, "%s/%s/45410047", game, u->d_name);
          if (!(ds = opendir(dir)))
-@@ -1281,7 +1407,10 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
+@@ -1281,11 +1503,20 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
          static const recomp_func_t row_input[] = {
              opt_row_input_0,
  #ifdef NFSU2_VULKAN
@@ -471,6 +603,16 @@ index 04dc96a..e1aec4c 100644
  #endif
          };
          return row_input[xbox_va - ROW_HANDLER_VA];
+     }
++#ifdef NFSU1_PS5
++    if (xbox_va == LANG_HANDLER_VA)
++        return lang_row_input_0;
++    if (xbox_va == LANG_HANDLER_VA + 1u)
++        return lang_row_input_1;
++#endif
+     return (recomp_func_t)0;
+ }
+ 
 diff --git a/xboxrecomp/src/apu/apu_core.c b/xboxrecomp/src/apu/apu_core.c
 index bb2e72a..835bf76 100644
 --- a/xboxrecomp/src/apu/apu_core.c
