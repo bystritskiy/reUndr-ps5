@@ -90,6 +90,9 @@ pack, which sharpens the logos and icons. The game content in them belongs to it
 
 ## Install
 
+You can also install the app from [RecompStore](https://recompstore.com/game/PPSA99025) or [ProsperoStore](https://prosperostore.net/app/PPSA99025/).
+You still need to provide your own disc files as described below.
+
 1. **The app.** Download `PPSA99025-<version>.zip` from
    [Releases](../../releases/latest), unpack it, and copy the `PPSA99025` folder to
    `/data/homebrew/` on the console. The **reUndr** tile appears on the home screen.
