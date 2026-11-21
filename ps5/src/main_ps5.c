@@ -170,6 +170,8 @@ int main(int argc,char **argv) {
  /* Lossless HD UI shares the existing LRU with world textures. */
  setenv("RECOMP_GL_TEX_MB","512",0);
  setenv("RECOMP_QUIET","1",0);setenv("NFSU2_FPS_CAP","60",0);
+ /* Guest clocks from the TSC: clock_gettime is a ~20 us system call on the PS5 (PS5_Vulkan docs/HARDWARE_FINDINGS.md:3261-3266). Measured on a PS5 (Inner City race): guest main thread 6.75->5.65 ms/frame, race hitches 2->0. RECOMP_FAST_TIME=0 in nfsu1_env.txt restores clock_gettime. */
+ setenv("RECOMP_FAST_TIME","1",0);
  { unsigned other=0;pthread_t t;if(!pthread_create(&t,NULL,tls_probe,&other))pthread_join(t,NULL);
    fprintf(stderr,"[TLS] native: main fp_cw=0x%x thread fp_cw=0x%x (want 0x37f)\n",g_fp_control_word,other);fflush(stderr); }
  char dir[1024]="/app0/game";
