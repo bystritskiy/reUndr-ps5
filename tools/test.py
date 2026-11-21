@@ -29,3 +29,7 @@ for name,sources in [('port_ui',['ps5/src/port_ui.c']),('xbe_check',['ps5/src/xb
     if name in ('hd','fmv'):
         result=subprocess.run([str(binary),'invalid'],capture_output=True,text=True,timeout=25)
         print(result.stdout+result.stderr,end='');result.check_returncode()
+    if name=='hd':
+        for mode in ('preload','p8'):
+            result=subprocess.run([str(binary),mode],capture_output=True,text=True,timeout=25)
+            print(result.stdout+result.stderr,end='');result.check_returncode()
