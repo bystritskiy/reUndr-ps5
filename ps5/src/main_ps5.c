@@ -18,6 +18,7 @@
 #include <dirent.h>
 #include <strings.h>
 extern int nfsu1_game_main(int,char **);
+extern int g_crash_log_fd; /* upstream/src/main.c crash_signal writes here past the pipe */
 /* Native TLS check: the value is .tdata's init image (0x37f), placed by the loader at the offset lld assumed. */
 extern __thread uint16_t g_fp_control_word;
 static void *tls_probe(void *out) { *(unsigned *)out=g_fp_control_word;return NULL; }
@@ -135,9 +136,10 @@ static void *log_writer(void *arg) {
  }
  close(s->from);close(s->to);return NULL;
 }
-static FILE *open_log(const char *path) {
+static FILE *open_log(const char *path,int *fd_out) {
  static struct log_sink sinks[2];static unsigned used;
  int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC,0666),ends[2];if(fd<0)return NULL;
+ if(fd_out)*fd_out=fd;
  if(used<2&&pipe(ends)==0) {
    FILE *stream=fdopen(ends[1],"w");pthread_t th;
    struct log_sink *sink=&sinks[used];*sink=(struct log_sink){ends[0],fd};
@@ -161,7 +163,7 @@ int main(int argc,char **argv) {
  mkdir("/data/nfsu1",0777);mkdir("/data/nfsu1/PPSA99025",0777);
  mkdir("/data/nfsu1/PPSA99025/save",0777);
  chmod("/data/nfsu1",0777);chmod("/data/nfsu1/PPSA99025",0777);
- FILE *out=open_log("/data/nfsu1/PPSA99025/stdout.log"),*err=open_log("/data/nfsu1/PPSA99025/stderr.log");
+ FILE *out=open_log("/data/nfsu1/PPSA99025/stdout.log",NULL),*err=open_log("/data/nfsu1/PPSA99025/stderr.log",&g_crash_log_fd);
  if(!out||!err)return 1;stdout=out;stderr=err;load_settings();
  sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.001.000\n");
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"offscreen");
