@@ -18,6 +18,9 @@
 #include <dirent.h>
 #include <strings.h>
 extern int nfsu1_game_main(int,char **);
+/* Native TLS check: the value is .tdata's init image (0x37f), placed by the loader at the offset lld assumed. */
+extern __thread uint16_t g_fp_control_word;
+static void *tls_probe(void *out) { *(unsigned *)out=g_fp_control_word;return NULL; }
 extern int sceSystemServiceHideSplashScreen(void);
 extern int sceKernelDebugOutText(int,const char *);
 extern int scePthreadSetaffinity(unsigned long,unsigned long);
@@ -167,6 +170,8 @@ int main(int argc,char **argv) {
  /* Lossless HD UI shares the existing LRU with world textures. */
  setenv("RECOMP_GL_TEX_MB","512",0);
  setenv("RECOMP_QUIET","1",0);setenv("NFSU2_FPS_CAP","60",0);
+ { unsigned other=0;pthread_t t;if(!pthread_create(&t,NULL,tls_probe,&other))pthread_join(t,NULL);
+   fprintf(stderr,"[TLS] native: main fp_cw=0x%x thread fp_cw=0x%x (want 0x37f)\n",g_fp_control_word,other);fflush(stderr); }
  char dir[1024]="/app0/game";
  if(!valid(dir))snprintf(dir,sizeof dir,"/data/nfsu1/game");
  if(!valid(dir)) {
