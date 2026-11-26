@@ -41,11 +41,15 @@ Cross/Circle/Square/Triangle = A/B/X/Y, R1/L1 = Black/White, L2/R2 = triggers,
 Options = Start, touchpad press = Back, L3/R3 = stick presses. For a second player,
 sign in a second local user (a guest will do); assist mode does not add a player.
 
-SOUND AND DETAIL
+PORT MENU
+
+Press Touchpad + Options during the game. The menu has the render scale,
+anti-aliasing, filtering, reflections, Detail Distance (8x by default), the
+frame rate, a performance overlay and a 60-second benchmark; changes apply at
+once. The benchmark's results are also kept in /data/reUndr/benchmark.txt.
 
 reUndr plays the game's 5.1 mix on a surround system and falls back to stereo by
-itself. Options > Port Settings has All Speakers (music and menus on every
-speaker, on by default), Speaker Test (one speaker at a time; set it back to
-Off) and LOD Distance (8x by default).
+itself. The menu's Audio tab has All Speakers (music and menus on every speaker,
+on by default) and Speaker Test (one speaker at a time).
 
 Settings, saves and logs are in /data/reUndr/. Licences are in licenses/.

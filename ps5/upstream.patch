@@ -106,7 +106,7 @@ index ad4c36c..d44c6e0 100644
  
      g_esp = XBOX_STACK_TOP;
 diff --git a/src/recomp_manual.c b/src/recomp_manual.c
-index 04dc96a..82e4850 100644
+index 04dc96a..f34be84 100644
 --- a/src/recomp_manual.c
 +++ b/src/recomp_manual.c
 @@ -18,6 +18,9 @@
@@ -119,7 +119,29 @@ index 04dc96a..82e4850 100644
  #include <stdio.h>
  #include <stdint.h>
  #include <stddef.h>
-@@ -418,16 +421,39 @@ static int hud_wide_on(void)
+@@ -242,15 +245,16 @@ extern void nv2a_pb_trap_lock(void);
+  * in time shows on the next vblank (60 fps at most); slower frames are
+  * unchanged. NFSU2_FPS_CAP=30 keeps the title's interval. (Same D3D code
+  * and trap format as NFSU2.) */
++static int s_fps30 = -1;                /* -1: NFSU2_FPS_CAP not read yet */
++static int s_fps_saved;                 /* nfsu1x_options.txt had fps= */
+ static int fps_cap_30(void)
+ {
+-    static int v = -1;
+-    if (v < 0) {
++    if (s_fps30 < 0) {
+         const char *e = getenv("NFSU2_FPS_CAP");
+-        v = e && atoi(e) == 30;
+-        fprintf(stderr, "[fps] cap: %s\n", v ? "30 (title)" : "60 (NFSU2_FPS_CAP=30 for 30)");
++        s_fps30 = e && atoi(e) == 30;
++        fprintf(stderr, "[fps] cap: %s\n", s_fps30 ? "30 (title)" : "60 (NFSU2_FPS_CAP=30 for 30)");
+     }
+-    return v;
++    return s_fps30;
+ }
+ extern void nv2a_pb_trap_unlock(void);
+ extern void nv2a_pb_trap_taken(void);
+@@ -418,16 +422,39 @@ static int hud_wide_on(void)
      return on;
  }
  
@@ -160,7 +182,7 @@ index 04dc96a..82e4850 100644
  
  void sub_00018E40(void)
  {
-@@ -477,8 +503,16 @@ void sub_00018E40(void)
+@@ -477,8 +504,16 @@ void sub_00018E40(void)
              yaw = (e ? (float)atof(e) : 5.0f) * 3.14159265f / 180.0f;
          }
          if (yaw != 0.0f) {
@@ -178,7 +200,7 @@ index 04dc96a..82e4850 100644
              memcpy(m, (void *)XBOX_PTR(ecx), sizeof m);
              for (j = 0; j < 4; j++) {
                  float r0 = m[j], r2 = m[8 + j];
-@@ -614,7 +648,7 @@ void sub_000192C0(void)
+@@ -614,7 +649,7 @@ void sub_000192C0(void)
   * this+0x3C+4*(N-1) (thiscall, the message, ret 4; dispatch at
   * 0x000C281C), Favorite Drive Camera's being sub_000C0C90: step a value,
   * rewrite the texts with sub_000DD490(package, object name, text) and
@@ -187,7 +209,7 @@ index 04dc96a..82e4850 100644
   * the same way after the original setup; their handlers are our own, at
   * unused int3 bytes after sub_000C0C20 (ROW_HANDLER_VA, recomp_lookup_manual).
   * Texts are our own strings in guest memory -- the language files are
-@@ -626,7 +660,7 @@ void sub_000192C0(void)
+@@ -626,7 +661,7 @@ void sub_000192C0(void)
   * 10..15, view(id) = 0x2C5F20 + id*0x60, drawn only while byte +8 is set):
   * the bytes are cleared for the call and put back after it.
   *
@@ -196,7 +218,7 @@ index 04dc96a..82e4850 100644
   * applied at the next flip; without a saved value RECOMP_GL_SCALE rules
   * and the row shows the nearest step), Anti-Aliasing = FXAA
   * (nv2a_vk_fxaa), Anisotropic Off..16x (nv2a_vk_aniso), Square Pixels
-@@ -639,7 +673,7 @@ void sub_000192C0(void)
+@@ -639,7 +674,7 @@ void sub_000192C0(void)
  #ifdef __SWITCH__
  #  define NFSU1_OPTIONS_FILE "sdmc:/switch/nfsu1x/nfsu1x_options.txt"
  #else
@@ -205,7 +227,15 @@ index 04dc96a..82e4850 100644
  #endif
  #define FE_PAD_LEFT     0x9120409Eu
  #define FE_PAD_RIGHT    0xB5971BF1u
-@@ -658,9 +692,23 @@ extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
+@@ -653,14 +688,31 @@ extern volatile int nv2a_vk_scale_pct;
+ extern volatile int nv2a_vk_fxaa;
+ extern volatile int nv2a_vk_aniso;
+ extern volatile int nv2a_vk_square;
++int nfsu1_port_overlay;                 /* the host's frame-rate overlay (port menu) */
++int nfsu1_port_menu_seen;               /* opened once: no more hint at start */
++static int s_port_pause = 1;            /* the port menu holds the title */
+ #endif
+ extern uint32_t xbox_ContiguousAlloc(uint32_t size, uint32_t alignment);
  extern void sub_000C2A70_gen(void);
  extern void sub_00016050_gen(void);
  
@@ -230,7 +260,7 @@ index 04dc96a..82e4850 100644
  static int s_refl = 1;                  /* 0 off, 1 on */
  static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
  static int s_scale_saved;               /* nfsu1x_options.txt had scale= */
-@@ -700,22 +748,28 @@ static void picture_changed(void)
+@@ -700,22 +752,28 @@ static void picture_changed(void)
  
  static const char *const s_onoff[] = { "Off", "On" };
  #ifdef NFSU2_VULKAN
@@ -261,7 +291,7 @@ index 04dc96a..82e4850 100644
  #ifdef NFSU2_VULKAN
      fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s, anti-aliasing %s,"
              " anisotropic %dx, square pixels %s\n",
-@@ -733,6 +787,13 @@ void nfsu1_options_load(void)
+@@ -733,6 +791,13 @@ void nfsu1_options_load(void)
      FILE *f = fopen(NFSU1_OPTIONS_FILE, "r");
      int i;
  
@@ -275,7 +305,7 @@ index 04dc96a..82e4850 100644
      if (f) {
          while (fgets(line, sizeof line, f)) {
              if (!strncmp(line, "reflections=", 12))
-@@ -747,9 +808,20 @@ void nfsu1_options_load(void)
+@@ -747,9 +812,32 @@ void nfsu1_options_load(void)
                      if (s_aniso_lvl[i] == a)
                          s_aniso_idx = i;
              }
@@ -284,6 +314,18 @@ index 04dc96a..82e4850 100644
 +            else if (!strncmp(line,"text_lang=",10)) nfsu1_port_lang_choose(0,line[10]=='1',1);
 +            else if (!strncmp(line,"voice_lang=",11)) nfsu1_port_lang_choose(1,line[11]=='1',1);
 +            else if (!strncmp(line,"music_lang=",11)) nfsu1_port_lang_choose(2,line[11]=='1',1);
++#endif
++#ifdef NFSU2_VULKAN
++            else if (!strncmp(line, "fps=", 4)) {
++                s_fps30 = atoi(line + 4) == 30;
++                s_fps_saved = 1;
++            }
++            else if (!strncmp(line, "overlay=", 8))
++                nfsu1_port_overlay = line[8] != '0';
++            else if (!strncmp(line, "menu_pause=", 11))
++                s_port_pause = line[11] != '0';
++            else if (!strncmp(line, "menu_seen=", 10))
++                nfsu1_port_menu_seen = line[10] != '0';
 +#endif
 +            else if (!strncmp(line, "lod=", 4)) {
 +                int pct = atoi(line + 4);
@@ -297,7 +339,7 @@ index 04dc96a..82e4850 100644
                      if (s_scale_pct[i] == pct) {
                          s_scale_idx = i;
                          s_scale_saved = 1;
-@@ -758,6 +830,10 @@ void nfsu1_options_load(void)
+@@ -758,6 +846,10 @@ void nfsu1_options_load(void)
          }
          fclose(f);
      }
@@ -308,7 +350,7 @@ index 04dc96a..82e4850 100644
      refl_changed();
  #ifdef NFSU2_VULKAN
      {
-@@ -766,7 +842,7 @@ void nfsu1_options_load(void)
+@@ -766,7 +858,7 @@ void nfsu1_options_load(void)
              /* RECOMP_GL_SCALE stays in charge until the option is changed;
               * the row shows the nearest step. */
              double k = strtod(e, NULL), best = 1e9;
@@ -317,7 +359,7 @@ index 04dc96a..82e4850 100644
                  double d = fabs(k * 100.0 - s_scale_pct[i]);
                  if (d < best) { best = d; s_scale_idx = i; }
              }
-@@ -786,7 +862,14 @@ static void options_save(void)
+@@ -786,34 +878,177 @@ static void options_save(void)
          fprintf(stderr, "[options] cannot write " NFSU1_OPTIONS_FILE "\n");
          return;
      }
@@ -333,7 +375,147 @@ index 04dc96a..82e4850 100644
      if (s_scale_saved)
          fprintf(f, "scale=%d\n", s_scale_pct[s_scale_idx]);
  #ifdef NFSU2_VULKAN
-@@ -798,22 +881,22 @@ static void options_save(void)
+     fprintf(f, "fxaa=%d\naniso=%d\nsquare=%d\n", s_fxaa, s_aniso_lvl[s_aniso_idx], s_square);
++    if (s_fps_saved)
++        fprintf(f, "fps=%d\n", fps_cap_30() ? 30 : 60);
++    fprintf(f, "overlay=%d\nmenu_pause=%d\nmenu_seen=%d\n", nfsu1_port_overlay, s_port_pause,
++            nfsu1_port_menu_seen);
+ #endif
+     fclose(f);
+ }
+ 
++#ifdef NFSU2_VULKAN
++/* ── Port menu (port_options.h) ───────────────────────────── */
++#include "port_options.h"
++
++#ifdef NFSU1_PS5
++static int opt_lang_kind(int id)
++{
++    return id == NFSU1_OPT_TEXT_LANG ? 0 : id == NFSU1_OPT_VOICE_LANG ? 1 : id == NFSU1_OPT_MUSIC ? 2 : -1;
++}
++#endif
++
++int nfsu1_opt_steps(int id)
++{
++    switch (id) {
++    case NFSU1_OPT_SCALE: return N_SCALE_STEPS;
++    case NFSU1_OPT_ANISO: return 5;
++    case NFSU1_OPT_LOD: return 6;
++#ifdef NFSU1_PS5
++    case NFSU1_OPT_SPEAKER_TEST: return 10;
++#else
++    case NFSU1_OPT_TEXT_LANG: case NFSU1_OPT_VOICE_LANG: case NFSU1_OPT_MUSIC:
++    case NFSU1_OPT_SPEAKERS: case NFSU1_OPT_SPEAKER_TEST: return 0;
++#endif
++    default: return id >= 0 && id < NFSU1_OPT_COUNT ? 2 : 0;
++    }
++}
++
++int nfsu1_opt_get(int id)
++{
++    switch (id) {
++    case NFSU1_OPT_SCALE: return s_scale_idx;
++    case NFSU1_OPT_FXAA: return s_fxaa;
++    case NFSU1_OPT_ANISO: return s_aniso_idx;
++    case NFSU1_OPT_SQUARE: return s_square;
++    case NFSU1_OPT_REFLECTIONS: return s_refl;
++    case NFSU1_OPT_LOD: return s_lod_idx;
++    case NFSU1_OPT_FPS: return fps_cap_30();
++    case NFSU1_OPT_OVERLAY: return nfsu1_port_overlay;
++    case NFSU1_OPT_PAUSE: return s_port_pause;
++#ifdef NFSU1_PS5
++    case NFSU1_OPT_TEXT_LANG: case NFSU1_OPT_VOICE_LANG: case NFSU1_OPT_MUSIC:
++        return nfsu1_port_lang_choice(opt_lang_kind(id));
++    case NFSU1_OPT_SPEAKERS: return s_audio_spread;
++    case NFSU1_OPT_SPEAKER_TEST: return s_speaker_test;
++#endif
++    }
++    return 0;
++}
++
++void nfsu1_opt_set(int id, int v)
++{
++    int n = nfsu1_opt_steps(id);
++    if (n <= 0)
++        return;
++    v = v < 0 ? 0 : v >= n ? n - 1 : v;
++    switch (id) {
++    case NFSU1_OPT_SCALE: s_scale_idx = v; scale_changed(); break;
++    case NFSU1_OPT_FXAA: s_fxaa = v; picture_changed(); break;
++    case NFSU1_OPT_ANISO: s_aniso_idx = v; picture_changed(); break;
++    case NFSU1_OPT_SQUARE: s_square = v; picture_changed(); break;
++    case NFSU1_OPT_REFLECTIONS: s_refl = v; refl_changed(); break;
++    case NFSU1_OPT_LOD: s_lod_idx = v; lod_changed(); break;
++    case NFSU1_OPT_FPS: s_fps30 = v; s_fps_saved = 1; break;
++    case NFSU1_OPT_OVERLAY: nfsu1_port_overlay = v; break;
++    case NFSU1_OPT_PAUSE: s_port_pause = v; break;
++#ifdef NFSU1_PS5
++    case NFSU1_OPT_TEXT_LANG: case NFSU1_OPT_VOICE_LANG: case NFSU1_OPT_MUSIC:
++        nfsu1_port_lang_choose(opt_lang_kind(id), v, 0);
++        break;
++    case NFSU1_OPT_SPEAKERS: s_audio_spread = v; spread_changed(); break;
++    case NFSU1_OPT_SPEAKER_TEST: s_speaker_test = v; speaker_test_changed(); break;
++#endif
++    }
++}
++
++/* lang.txt has the names in the text tables' Windows-1251, the menu draws UTF-8. */
++const char *nfsu1_opt_lang_text(int id, int v, char *buf, unsigned cap)
++{
++    unsigned n = 0;
++
++    if (!cap)
++        return "";
++    buf[0] = 0;
++#ifdef NFSU1_PS5
++    {
++        int kind = opt_lang_kind(id);
++        const unsigned char *p = (const unsigned char *)nfsu1_port_lang_name(kind, v);
++        for (; *p && n + 4 < cap; p++) {
++            unsigned c = *p;
++            if (c >= 0xC0)
++                c += 0x410 - 0xC0;          /* А..я */
++            else if (c == 0xA8)
++                c = 0x401;                  /* Ё */
++            else if (c == 0xB8)
++                c = 0x451;                  /* ё */
++            else if (c >= 0x80)
++                c = '?';
++            if (c < 0x80) {
++                buf[n++] = (char)c;
++            } else {
++                buf[n++] = (char)(0xC0 | c >> 6);
++                buf[n++] = (char)(0x80 | (c & 0x3F));
++            }
++        }
++        buf[n] = 0;
++        if ((v != 0) != nfsu1_port_lang_active(kind) && n + 18 < cap)
++            memcpy(buf + n, " (after restart)", 17);
++    }
++#else
++    (void)id; (void)v; (void)n;
++#endif
++    return buf;
++}
++
++int nfsu1_opt_shown(int id)
++{
++    switch (id) {
++#ifdef NFSU1_PS5
++    case NFSU1_OPT_TEXT_LANG: case NFSU1_OPT_VOICE_LANG: case NFSU1_OPT_MUSIC:
++        return nfsu1_port_lang_name(opt_lang_kind(id), 0)[0] != 0;
++#endif
++    default: return nfsu1_opt_steps(id) > 0;
++    }
++}
++
++void nfsu1_opt_save(void)
++{
++    options_save();
++    options_log();
++}
++#endif
++
  /* Our texts in guest memory, each copied once. */
  static uint32_t guest_str(const char *s)
  {
@@ -361,7 +543,7 @@ index 04dc96a..82e4850 100644
          return 0;
      memcpy((void *)XBOX_PTR(pool + used), s, n);
      cache[i].s = s;
-@@ -825,6 +908,9 @@ static uint32_t guest_str(const char *s)
+@@ -825,6 +1060,9 @@ static uint32_t guest_str(const char *s)
  /* sub_000DD490(package, object name, text), cdecl. */
  static void fe_set_text(uint32_t screen, const char *object, const char *text)
  {
@@ -371,7 +553,7 @@ index 04dc96a..82e4850 100644
      uint32_t name = guest_str(object), str = guest_str(text);
  
      if (!name || !str)
-@@ -835,13 +921,28 @@ static void fe_set_text(uint32_t screen, const char *object, const char *text)
+@@ -835,13 +1073,28 @@ static void fe_set_text(uint32_t screen, const char *object, const char *text)
      PUSH32(esp, ROW_HANDLER_VA);
      sub_000DD490();
      esp += 12;
@@ -402,7 +584,7 @@ index 04dc96a..82e4850 100644
  };
  
  static void opt_row_text(uint32_t screen, int i)
-@@ -850,6 +951,33 @@ static void opt_row_text(uint32_t screen, int i)
+@@ -850,6 +1103,33 @@ static void opt_row_text(uint32_t screen, int i)
      fe_set_text(screen, s_data_obj[i], s_rows[i].texts[*s_rows[i].value]);
  }
  
@@ -436,7 +618,7 @@ index 04dc96a..82e4850 100644
  /* Camera setup (thiscall, ecx = options screen, ret): the game's two rows,
   * then ours. */
  void sub_000C2A70(void)
-@@ -876,6 +1004,22 @@ void sub_000C2A70(void)
+@@ -876,6 +1156,22 @@ void sub_000C2A70(void)
      }
  }
  
@@ -459,7 +641,7 @@ index 04dc96a..82e4850 100644
  /* Row input (thiscall, the message, ret 4), as sub_000C0C90: left/right
   * step the value (wrapping), then the texts and the arrow sound. */
  static void opt_row_input(int i)
-@@ -889,17 +1033,7 @@ static void opt_row_input(int i)
+@@ -889,17 +1185,7 @@ static void opt_row_input(int i)
          options_save();
          options_log();
          opt_row_text(screen, i);
@@ -478,7 +660,7 @@ index 04dc96a..82e4850 100644
      }
      esp += 8;
  }
-@@ -910,6 +1044,96 @@ static void opt_row_input_1(void) { opt_row_input(1); }
+@@ -910,6 +1196,96 @@ static void opt_row_input_1(void) { opt_row_input(1); }
  static void opt_row_input_2(void) { opt_row_input(2); }
  static void opt_row_input_3(void) { opt_row_input(3); }
  static void opt_row_input_4(void) { opt_row_input(4); }
@@ -575,7 +757,7 @@ index 04dc96a..82e4850 100644
  #endif
  
  /* Race render (cdecl, no arguments): cube-face views off for the call. */
-@@ -1074,7 +1298,7 @@ static char s_al_name[32];              /* newest save's profile */
+@@ -1074,7 +1450,7 @@ static char s_al_name[32];              /* newest save's profile */
   * many there are. */
  static int autoload_find_save(void)
  {
@@ -584,7 +766,7 @@ index 04dc96a..82e4850 100644
      char dir[600], sub[700], path[800];
      struct dirent *u, *s, *f;
      DIR *du, *ds, *df;
-@@ -1089,7 +1313,7 @@ static int autoload_find_save(void)
+@@ -1089,7 +1465,7 @@ static int autoload_find_save(void)
      if (!(du = opendir(game)))
          return 0;
      while ((u = readdir(du))) {                 /* UDATA, any case */
@@ -593,7 +775,7 @@ index 04dc96a..82e4850 100644
              continue;
          snprintf(dir, sizeof dir, "%s/%s/45410047", game, u->d_name);
          if (!(ds = opendir(dir)))
-@@ -1281,11 +1505,22 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
+@@ -1281,11 +1657,22 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
          static const recomp_func_t row_input[] = {
              opt_row_input_0,
  #ifdef NFSU2_VULKAN
@@ -1448,7 +1630,7 @@ index 0000000..67229f7
 +
 +#endif
 diff --git a/xboxrecomp/src/nv2a_vk/nv2a_vk.c b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
-index 773dd12..472d5dd 100644
+index 773dd12..37ab365 100644
 --- a/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 +++ b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 @@ -29,7 +29,7 @@
@@ -1460,7 +1642,7 @@ index 773dd12..472d5dd 100644
   *   RECOMP_GL_SCALE_X=<k>            horizontal scale, if not the same
   *   RECOMP_VK_SQUARE=0               widescreen without 4/3 more columns on
   *                                    surfaces without horizontal AA
-@@ -40,6 +40,11 @@
+@@ -40,10 +40,14 @@
   *                                    (default -0.25: a little sharper)
   *   RECOMP_VK_FXAA=0                 present with a plain blit, no FXAA
   *   RECOMP_VK_FXAA_SUBPIX=<s>        FXAA sub-pixel smoothing 0..1 (0.25)
@@ -1472,9 +1654,15 @@ index 773dd12..472d5dd 100644
   *   RECOMP_VK_VALIDATION=1           (Linux) enable the Khronos validation layer
   *   RECOMP_VK_HEADLESS=1             (Linux) no window, no present
   */
-@@ -54,8 +59,8 @@
+-#include "nv2a_vk.h"
+ #include "../nv2a_gl/gl_psh.h"
+ #include "../nv2a_gl/gl_vsh.h"
+ #include "../kernel/nv2a_backend.h"
+@@ -53,9 +57,10 @@
+ #define VK_USE_PLATFORM_VI_NN 1
  #endif
  #include <vulkan/vulkan.h>
++#include "nv2a_vk.h"
  #if !defined(__SWITCH__)
 -#include <SDL.h>
 -#include <SDL_vulkan.h>
@@ -1497,7 +1685,22 @@ index 773dd12..472d5dd 100644
  
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
-@@ -310,6 +322,10 @@ typedef struct {
+@@ -129,6 +141,14 @@ static VkExtent2D     s_sc_extent;
+ static uint32_t       s_sc_count;
+ static VkImage        s_sc_images[8];
+ static VkImageView    s_sc_views[8];
++static uint32_t       s_sc_gen;         /* bumped by create_swapchain */
++#if defined(NFSU1_PS5)
++/* Host hooks (weak): the overlay drawn over every presented image, and the
++ * menu that holds the title (see vk_flip). */
++extern void nv2a_host_overlay(const Nv2aVkOverlay *o) __attribute__((weak));
++extern int nv2a_host_paused(void) __attribute__((weak));
++#endif
++volatile unsigned nv2a_vk_frame_draws;
+ static int            s_headless;
+ #if !defined(__SWITCH__)
+ static SDL_Window    *s_win;
+@@ -310,6 +330,10 @@ typedef struct {
   * RECOMP_VK_SQUARE=0 off; RECOMP_GL_SCALE_X overrides it. */
  static double   s_scale = 1.0, s_scale_x = 1.0, s_xratio = 1.0;
  static int      s_square, s_square_env;
@@ -1508,7 +1711,7 @@ index 773dd12..472d5dd 100644
  
  /* Picture options set at run time (NFSU2: Options -> Video), read by the
   * renderer: FXAA on/off (at every present), anisotropic level 1..16 (per
-@@ -326,11 +342,55 @@ static uint32_t s_max_size = 4096;
+@@ -326,11 +350,55 @@ static uint32_t s_max_size = 4096;
   * flip (rescale_surfaces). */
  volatile int nv2a_vk_scale_pct;
  
@@ -1568,7 +1771,7 @@ index 773dd12..472d5dd 100644
      if (w * kx > (double)s_max_size)
          kx = (double)s_max_size / w;
      if (h * ky > (double)s_max_size)
-@@ -745,7 +805,7 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
+@@ -745,7 +813,7 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
      memset(s, 0, sizeof *s);
      s->va = va; s->w = w; s->h = h; s->used = s_frame;
      s->aa_sx = aa_sx; s->aa_sy = aa_sy;
@@ -1577,7 +1780,7 @@ index 773dd12..472d5dd 100644
      if (!make_image(s->pw, s->ph, VK_FORMAT_B8G8R8A8_UNORM,
                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-@@ -781,7 +841,7 @@ static void rescale_surfaces(double k)
+@@ -781,7 +849,7 @@ static void rescale_surfaces(double k)
          uint32_t pw, ph;
          if (!s->image)
              continue;
@@ -1586,7 +1789,7 @@ index 773dd12..472d5dd 100644
          if (pw == s->pw && ph == s->ph)
              continue;
          if (!make_image(pw, ph, VK_FORMAT_B8G8R8A8_UNORM,
-@@ -884,11 +944,13 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
+@@ -884,11 +952,13 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
  
  typedef struct {
      uint32_t va, color, w, h, pitch, hash, bytes;
@@ -1600,7 +1803,7 @@ index 773dd12..472d5dd 100644
  } VkTex;
  
  /* RECOMP_VK_MIPS=0: level 0 only (the old look). RECOMP_VK_ANISO=<n>:
-@@ -1078,8 +1140,8 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
+@@ -1078,8 +1148,8 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
      rg.imageSubresource.mipLevel = level;
      rg.imageSubresource.baseArrayLayer = layer;
      rg.imageSubresource.layerCount = 1;
@@ -1611,7 +1814,7 @@ index 773dd12..472d5dd 100644
      rg.imageExtent.depth = 1;
      vkCmdCopyBufferToImage(s_cb, s_f->ring, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
  }
-@@ -1221,6 +1283,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1221,6 +1291,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
      uint32_t i, hash;
      VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
      uint32_t layers = face ? 6 : 1, f, size;
@@ -1627,7 +1830,7 @@ index 773dd12..472d5dd 100644
  
      for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
          VkTex *c = &s_tex[i - 1];
-@@ -1251,7 +1322,51 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1251,7 +1330,51 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
      if (s_have_bc && color == 0x0C) fmt = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
      if (s_have_bc && color == 0x0E) fmt = VK_FORMAT_BC2_UNORM_BLOCK;
      if (s_have_bc && color == 0x0F) fmt = VK_FORMAT_BC3_UNORM_BLOCK;
@@ -1680,7 +1883,7 @@ index 773dd12..472d5dd 100644
          tex_free(t);
          t = NULL;
      }
-@@ -1266,13 +1381,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1266,13 +1389,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
              tex_free(t);
          t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch; t->fmt = fmt;
          t->face = face; t->levels = levels;
@@ -1697,7 +1900,7 @@ index 773dd12..472d5dd 100644
              return face ? s_dummy_cube_view : s_dummy_view;
          }
          tex_index_add(t);
-@@ -1281,14 +1398,37 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1281,14 +1406,37 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
                   face ? " cube" : "");
      }
      t->hash = hash;
@@ -1741,7 +1944,7 @@ index 773dd12..472d5dd 100644
          size += size / 3;                   /* the mip chain */
      tex_account(t, size * layers);
      return t->view;
-@@ -1347,6 +1487,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
+@@ -1347,6 +1495,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
              LOGE("cube 0x%08X %ux%u from surfaces (stored %u)\n", va, w, h, size);
      }
      c->used = s_frame;
@@ -1750,7 +1953,7 @@ index 773dd12..472d5dd 100644
      for (f = 0; f < 6; f++) {
          VkSurf *sf = faces[f];
          VkImageBlit bl;
-@@ -1650,7 +1792,7 @@ static const char *cache_dir(void)
+@@ -1650,7 +1800,7 @@ static const char *cache_dir(void)
  #if defined(__SWITCH__)
      return "sdmc:/switch/nfsu1x/";
  #else
@@ -1759,7 +1962,15 @@ index 773dd12..472d5dd 100644
  #endif
  }
  
-@@ -2433,30 +2575,29 @@ static int ready(void)
+@@ -2387,6 +2537,7 @@ static int create_swapchain(void)
+         if (vkCreateImageView(s_dev, &vi, NULL, &s_sc_views[i]) != VK_SUCCESS)
+             s_sc_views[i] = VK_NULL_HANDLE;     /* that image falls back to the blit */
+     }
++    s_sc_gen++;
+     fprintf(stderr, "  [VK] swapchain %ux%u, %u images, format %d, present mode %d\n",
+             s_sc_extent.width, s_sc_extent.height, s_sc_count, s_sc_format, mode);
+     return 1;
+@@ -2433,30 +2584,29 @@ static int ready(void)
  #else
      {
          const char *e = getenv("RECOMP_VK_HEADLESS");
@@ -1803,7 +2014,7 @@ index 773dd12..472d5dd 100644
      }
      {
          const char *v = getenv("RECOMP_VK_VALIDATION");
-@@ -2495,7 +2636,7 @@ static int ready(void)
+@@ -2495,7 +2645,7 @@ static int ready(void)
          if (pp.limits.maxFramebufferHeight < m) m = pp.limits.maxFramebufferHeight;
          s_max_size = m ? m : 4096;
          if (!(k > 0.0)) k = 1.0;                    /* unset, 0 or garbage */
@@ -1812,7 +2023,7 @@ index 773dd12..472d5dd 100644
          e = getenv("RECOMP_VK_SQUARE");
          s_square_env = xbox_video_widescreen() && !(e && *e == '0');
          e = getenv("RECOMP_GL_SCALE_X");
-@@ -2504,11 +2645,16 @@ static int ready(void)
+@@ -2504,11 +2654,16 @@ static int ready(void)
              s_square_env = 0;
          s_square = s_square_env && nv2a_vk_square;
          if (k > 0.0)
@@ -1830,7 +2041,7 @@ index 773dd12..472d5dd 100644
      }
      if (s_ubo_align < 16) s_ubo_align = 16;
      vkGetPhysicalDeviceMemoryProperties(s_pd, &s_memprops);
-@@ -2530,6 +2676,7 @@ static int ready(void)
+@@ -2530,6 +2685,7 @@ static int ready(void)
              s_aniso = 1.0f;
          if (s_aniso > pp.limits.maxSamplerAnisotropy)
              s_aniso = pp.limits.maxSamplerAnisotropy;
@@ -1838,7 +2049,7 @@ index 773dd12..472d5dd 100644
      }
      {
          VkFormatProperties fp;
-@@ -2565,9 +2712,9 @@ static int ready(void)
+@@ -2565,9 +2721,9 @@ static int ready(void)
          }
      }
  #else
@@ -1850,7 +2061,7 @@ index 773dd12..472d5dd 100644
      }
  #endif
  
-@@ -2613,8 +2760,8 @@ static int ready(void)
+@@ -2613,8 +2769,8 @@ static int ready(void)
  #undef GET
  
      if (!s_headless && !create_swapchain()) {
@@ -1861,7 +2072,7 @@ index 773dd12..472d5dd 100644
      }
  
      {
-@@ -3435,6 +3582,8 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
+@@ -3435,6 +3591,8 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
  
      if (!ready())
          return;
@@ -1870,7 +2081,7 @@ index 773dd12..472d5dd 100644
      s_regs = r;
      s_batch = b;
      if (s_inst_on < 0) {
-@@ -3787,6 +3936,17 @@ static void dump_surface(VkSurf *s, const char *path)
+@@ -3787,6 +3945,17 @@ static void dump_surface(VkSurf *s, const char *path)
      vkCmdCopyImageToBuffer(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, buf, 1, &rg);
      flush_frame_wait();
      if (vkMapMemory(s_dev, mem, 0, bci.size, 0, &ptr) == VK_SUCCESS) {
@@ -1888,7 +2099,7 @@ index 773dd12..472d5dd 100644
          dump_bmp(path, (const uint8_t *)ptr, s->pw, s->ph);
          vkUnmapMemory(s_dev, mem);
      }
-@@ -3808,6 +3968,7 @@ static VkDescriptorSetLayout s_pp_dsl;
+@@ -3808,6 +3977,7 @@ static VkDescriptorSetLayout s_pp_dsl;
  static VkPipelineLayout      s_pp_layout;
  static VkSampler             s_pp_sampler;
  static struct { VkFormat fmt; VkPipeline pipe; } s_pp[2];
@@ -1896,7 +2107,7 @@ index 773dd12..472d5dd 100644
  
  static const char s_pp_vs[] =
      "#version 450\n"
-@@ -3825,15 +3986,14 @@ static const char s_pp_fs[] =
+@@ -3825,15 +3995,14 @@ static const char s_pp_fs[] =
      "float Lat(vec2 uv) { return L(textureLod(src, uv, 0.0).rgb); }\n"
      "#define LO(x, y) L(textureLodOffset(src, uv, 0.0, ivec2(x, y)).rgb)\n"
      "const float Q[8] = float[](1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 4.0, 8.0);\n"
@@ -1914,7 +2125,7 @@ index 773dd12..472d5dd 100644
      "    float lDL = LO(-1, 1), lUR = LO(1, -1), lUL = LO(-1, -1), lDR = LO(1, 1);\n"
      "    float lDU = lD + lU, lLR = lL + lR;\n"
      "    float lLc = lDL + lUL, lDc = lDL + lDR, lRc = lDR + lUR, lUc = lUR + lUL;\n"
-@@ -3872,7 +4032,18 @@ static const char s_pp_fs[] =
+@@ -3872,7 +4041,18 @@ static const char s_pp_fs[] =
      "    float s2 = (-2.0 * s1 + 3.0) * s1 * s1;\n"
      "    fin = max(fin, s2 * s2 * pc.rcp.z);\n"
      "    if (hor) uv.y += fin * step; else uv.x += fin * step;\n"
@@ -1934,7 +2145,7 @@ index 773dd12..472d5dd 100644
      "}\n";
  
  static int fxaa_on(void)
-@@ -3910,6 +4081,8 @@ static VkPipeline pp_pipe(VkFormat fmt)
+@@ -3910,6 +4090,8 @@ static VkPipeline pp_pipe(VkFormat fmt)
      for (i = 0; i < 2; i++)
          if (s_pp[i].pipe && s_pp[i].fmt == fmt)
              return s_pp[i].pipe;
@@ -1943,7 +2154,7 @@ index 773dd12..472d5dd 100644
      if (!s_pp_layout) {
          VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                             VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-@@ -3976,6 +4149,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
+@@ -3976,6 +4158,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
      if (!pipe) {
          LOGE("FXAA pipeline failed; presenting with a blit\n");
          s_fxaa = 0;
@@ -1951,7 +2162,7 @@ index 773dd12..472d5dd 100644
          return VK_NULL_HANDLE;
      }
      i = s_pp[0].pipe ? 1 : 0;
-@@ -4001,8 +4175,15 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+@@ -4001,8 +4184,15 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
      VkRect2D sc = { { dx, dy }, { (uint32_t)dw, (uint32_t)dh } };
      VkDescriptorImageInfo ii;
      VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -1969,7 +2180,7 @@ index 773dd12..472d5dd 100644
      if (!pipe || !dview)
          return 0;
      end_rendering();
-@@ -4040,7 +4221,8 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+@@ -4040,7 +4230,8 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
      p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_layout, 0, 1, &wr);
      pc[0] = (float)dx; pc[1] = (float)dy; pc[2] = (float)dw; pc[3] = (float)dh;
      pc[4] = 1.0f / (float)s->pw; pc[5] = 1.0f / (float)s->ph;
@@ -1979,7 +2190,7 @@ index 773dd12..472d5dd 100644
      vkCmdPushConstants(s_cb, s_pp_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
      vkCmdDraw(s_cb, 3, 1, 0, 0);
      p_end_rendering(s_cb);
-@@ -4059,12 +4241,13 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+@@ -4059,12 +4250,13 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
  static void dump_fxaa(VkSurf *s, const char *path)
  {
      static VkSurf t;
@@ -1995,16 +2206,53 @@ index 773dd12..472d5dd 100644
          if (!make_image(t.pw, t.ph, VK_FORMAT_B8G8R8A8_UNORM,
                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                          VK_IMAGE_ASPECT_COLOR_BIT, &t.image, &t.view, &t.mem)) {
-@@ -4086,6 +4269,8 @@ static void dump_fxaa(VkSurf *s, const char *path)
+@@ -4086,16 +4278,15 @@ static void dump_fxaa(VkSurf *s, const char *path)
   * elsewhere: the call is skipped. */
  extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
  
 +#include "flare_glare.h"   /* FLARE_FIX */
++static void present_frame(VkSurf *s);
++static uint64_t s_hz_last;              /* the last flip, for [hitch] */
 +
  static void vk_flip(void)
  {
      static int dump_every = -1;
-@@ -4178,23 +4363,33 @@ static void vk_flip(void)
+     static char dump_prefix[256];
+     VkSurf *s = s_last;
+-    uint32_t idx = 0;
+-    int have_image = 0;
+-    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+-    VkPipelineStageFlags ws = VK_PIPELINE_STAGE_TRANSFER_BIT |
+-                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+ 
+     if (!ready())
+         return;
+@@ -4121,11 +4312,11 @@ static void vk_flip(void)
+         }
+     }
+     {
+-        static uint64_t last_ns, window_ns;
++        static uint64_t window_ns;
+         static int lines;
+         uint64_t now = hz_now();
+-        if (last_ns) {
+-            uint64_t dt = now - last_ns;
++        if (s_hz_last) {
++            uint64_t dt = now - s_hz_last;
+             if (now - window_ns > 10000000000ull) { window_ns = now; lines = 0; }
+             if (dt > 50000000ull && lines++ < 30)
+                 fprintf(stderr, "[hitch] frame %u: %.0f ms -- %u programs compiled (%.0f ms),"
+@@ -4133,7 +4324,8 @@ static void vk_flip(void)
+                         s_hz_progs, s_hz_prog_ns / 1e6, s_hz_texs,
+                         s_hz_tex_bytes / 1048576.0, s_hz_tex_ns / 1e6, s_hz_draws);
+         }
+-        last_ns = now;
++        s_hz_last = now;
++        nv2a_vk_frame_draws = s_hz_draws;
+         s_hz_progs = s_hz_texs = s_hz_draws = 0;
+         s_hz_prog_ns = s_hz_tex_ns = s_hz_tex_bytes = 0;
+     }
+@@ -4178,23 +4370,33 @@ static void vk_flip(void)
      end_rendering();
      s_rt = NULL;
      s_rt_depth = NULL;
@@ -2041,7 +2289,7 @@ index 773dd12..472d5dd 100644
              snprintf(path, sizeof path, "%s%05u_fxaa.bmp", dump_prefix, s_frame);
              barrier_all();
              dump_fxaa(s, path);
-@@ -4202,6 +4397,17 @@ static void vk_flip(void)
+@@ -4202,6 +4404,55 @@ static void vk_flip(void)
      }
      barrier_all();
  
@@ -2056,10 +2304,48 @@ index 773dd12..472d5dd 100644
 +        }
 +    }
 +#endif
++    present_frame(s);
++#if defined(NFSU1_PS5)
++    /* The host's menu holds the title: while it is open the executor stays
++     * here, the title waits on its pushbuffer, and the last frame is shown
++     * again with the menu over it. A new render scale or square pixels
++     * apply to the held frame at once (rescale_surfaces keeps its pixels). */
++    if (nv2a_host_paused && nv2a_host_paused()) {
++        do {
++            int pct = nv2a_vk_scale_pct;
++            double k = pct < 50 ? 0.0 : pct > 450 ? 4.5 : pct / 100.0;
++            int sq = s_square_env && nv2a_vk_square;
++            if (!(k > 0.0))
++                k = s_scale;
++            if (k != s_scale || sq != s_square) {
++                end_rendering();
++                s_square = sq;
++                rescale_surfaces(k);
++                s = s_last;
++            }
++            barrier_all();
++            present_frame(s);
++        } while (nv2a_host_paused());
++        s_hz_last = 0;                  /* the held time is not a hitch */
++    }
++#endif
++}
++
++/* The finished frame to the screen: composite s (the title's last
++ * surface) into a swapchain image, the host's overlay on top, submit and
++ * present, then begin the next frame's recording. */
++static void present_frame(VkSurf *s)
++{
++    uint32_t idx = 0;
++    int have_image = 0;
++    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++    VkPipelineStageFlags ws = VK_PIPELINE_STAGE_TRANSFER_BIT |
++                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++
      VT("flip %u: surface %08X drew %d, acquiring\n", s_frame, s ? s->va : 0, s_drew_any);
      if (!s_headless) {
          VkResult rr = vkAcquireNextImageKHR(s_dev, s_swapchain, UINT64_MAX, s_f->acquired,
-@@ -4228,7 +4434,7 @@ static void vk_flip(void)
+@@ -4228,7 +4479,7 @@ static void vk_flip(void)
                  dw = (int)(lw * scale); dh = (int)(lh * scale);
                  dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
              }
@@ -2068,13 +2354,61 @@ index 773dd12..472d5dd 100644
                  && present_fxaa(s, dst, s_sc_views[idx], s_sc_format, s_sc_extent, dx, dy, dw, dh,
                                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT))
-@@ -4777,3 +4983,6 @@ void nv2a_vk_install(void)
+@@ -4272,6 +4523,16 @@ static void vk_flip(void)
+             vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+         presented:;
++#if defined(NFSU1_PS5)
++            if (nv2a_host_overlay) {
++                Nv2aVkOverlay o;
++                o.inst = s_inst; o.pd = s_pd; o.dev = s_dev; o.queue = s_queue; o.qfam = s_qfam;
++                o.format = s_sc_format; o.extent = s_sc_extent; o.count = s_sc_count;
++                o.images = s_sc_images; o.views = s_sc_views; o.index = idx; o.cb = s_cb;
++                o.gen = s_sc_gen;
++                nv2a_host_overlay(&o);
++            }
++#endif
+         }
+     }
+     VT("flip %u: submit (image %d)\n", s_frame, have_image);
+@@ -4777,3 +5038,6 @@ void nv2a_vk_install(void)
      nv2a_backend_register(&s_backend);
      fprintf(stderr, "[BOOT] NV2A Vulkan renderer registered\n");
  }
 +
 +/* PS5: fail at boot when VideoOut or required Vulkan features are unavailable. */
 +int nv2a_vk_prepare(void) { return ready(); }
+diff --git a/xboxrecomp/src/nv2a_vk/nv2a_vk.h b/xboxrecomp/src/nv2a_vk/nv2a_vk.h
+index 0ce22e1..87188cd 100644
+--- a/xboxrecomp/src/nv2a_vk/nv2a_vk.h
++++ b/xboxrecomp/src/nv2a_vk/nv2a_vk.h
+@@ -5,4 +5,26 @@
+ /* Register the Vulkan back end with the executor (nv2a_backend.h). */
+ void nv2a_vk_install(void);
+ 
++#ifdef VK_VERSION_1_0
++/* Host overlay (PS5): called at every present with the swapchain image in
++ * PRESENT_SRC_KHR layout, recording into cb; it must leave it in that
++ * layout. gen changes whenever the swapchain is rebuilt. */
++typedef struct {
++    VkInstance inst;
++    VkPhysicalDevice pd;
++    VkDevice dev;
++    VkQueue queue;
++    uint32_t qfam;
++    VkFormat format;
++    VkExtent2D extent;
++    uint32_t count, index, gen;
++    const VkImage *images;
++    const VkImageView *views;
++    VkCommandBuffer cb;
++} Nv2aVkOverlay;
++#endif
++
++/* Last frame: draws issued (the host's overlay shows it). */
++extern volatile unsigned nv2a_vk_frame_draws;
++
+ #endif
 diff --git a/xboxrecomp/src/platform/fast_time.h b/xboxrecomp/src/platform/fast_time.h
 new file mode 100644
 index 0000000..541b9ec

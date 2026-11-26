@@ -12,9 +12,10 @@ static unsigned buttons[4], filter_calls[2];
 static uint8_t motors[4][2];
 static int initialized, pad_initialized, list_calls;
 static time_t ticks = 1;
+static long tick_ms;
 static int index_of(int user) { assert(user>=10 && user<=40 && user%10==0);return user/10-1; }
 int clock_gettime(clockid_t id, struct timespec *out)
-{ assert(id==CLOCK_MONOTONIC);*out=(struct timespec){.tv_sec=ticks};return 0; }
+{ assert(id==CLOCK_MONOTONIC);*out=(struct timespec){.tv_sec=ticks,.tv_nsec=tick_ms*1000000L};return 0; }
 int sceUserServiceInitialize(const void *p) { assert(!p);initialized++;return 0; }
 int scePadInit(void) { pad_initialized++;return 0; }
 int sceUserServiceGetInitialUser(int *out) { *out=initial;return initial<0?-1:0; }
@@ -68,6 +69,27 @@ int main(void)
     assert(motors[0][0]==0xab&&motors[0][1]==0x12&&motors[1][0]==0x45&&motors[1][1]==0x89);
     assert(xbox_InputSetState(2,&v1)==ERROR_DEVICE_NOT_CONNECTED);
     XBOX_INPUT_CAPABILITIES caps;assert(!xbox_InputGetCapabilities(1,0,&caps)&&caps.Type==1);
+    /* Port menu. Options or Touchpad alone reaches the title 100 ms late and a
+     * shorter tap is still seen; the two together never do, until both are up. */
+    const unsigned menu_keys=XBOX_GAMEPAD_START|XBOX_GAMEPAD_BACK;
+    buttons[0]=0x08;assert(!(get(0,1).Gamepad.wButtons&menu_keys));
+    tick_ms+=100;assert(get(0,1).Gamepad.wButtons&XBOX_GAMEPAD_START);
+    buttons[0]=0;assert(!(get(0,1).Gamepad.wButtons&menu_keys));
+    buttons[0]=0x100008;assert(!(get(0,1).Gamepad.wButtons&menu_keys));
+    tick_ms+=200;assert(!(get(0,1).Gamepad.wButtons&menu_keys));
+    buttons[0]=0x08;tick_ms+=200;assert(!(get(0,1).Gamepad.wButtons&menu_keys));
+    buttons[0]=0;get(0,1);
+    buttons[0]=0x100000;get(0,1);tick_ms+=30;buttons[0]=0;
+    assert(get(0,1).Gamepad.wButtons&XBOX_GAMEPAD_BACK);
+    tick_ms+=60;assert(!(get(0,1).Gamepad.wButtons&menu_keys));
+    /* While the menu holds pad 1, and until its buttons are let go, the title
+     * sees none of them; the menu reads them raw. Pad 2 is not held. */
+    buttons[0]=0x4000;nfsu1_ps5_pad_hold(1);
+    assert(!get(0,1).Gamepad.bAnalogButtons[XBOX_BUTTON_A]&&nfsu1_ps5_pad_buttons()==0x4000);
+    assert(get(1,1).Gamepad.bAnalogButtons[XBOX_BUTTON_B]==255);
+    nfsu1_ps5_pad_hold(0);assert(!get(0,1).Gamepad.bAnalogButtons[XBOX_BUTTON_A]);
+    buttons[0]=0;get(0,1);
+    buttons[0]=0x4000;assert(get(0,1).Gamepad.bAnalogButtons[XBOX_BUTTON_A]==255);
     /* Reordering the system list cannot swap player numbers. */
     users[0]=20;users[1]=10;ticks++;p2=get(1,1);assert(p2.Gamepad.bAnalogButtons[XBOX_BUTTON_B]);
     live[0]=0;get(0,0);get(1,1);live[0]=1;get(0,1);
@@ -95,5 +117,5 @@ int main(void)
     users[1]=20;users[2]=-1;live[1]=1;ticks++;get(1,1);
     assert(initialized==1&&pad_initialized==1);
     nfsu1_ps5_input_shutdown();
-    puts("Two-user DualSense input: independent buttons/rumble, stable slots, hotplug, logout, failures and ownership: pass");
+    puts("Two-user DualSense input: independent buttons/rumble, stable slots, hotplug, logout, failures, ownership and the port menu combo: pass");
 }

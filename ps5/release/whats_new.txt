@@ -1,0 +1,11 @@
+01.002.000
+- Port menu: press Touchpad + Options during the game. Graphics, sound and frame rate settings are in one place and apply at once.
+- Performance overlay and a 60-second benchmark.
+- Everything reUndr keeps is now in /data/reUndr. Files from /data/nfsu1 move there at the first start.
+01.001.000
+- Clean dumps work: any default.xbe next to the game folders starts.
+- 5.1 surround. Cars and effects keep the game's own 5.1 positions on a surround system, through the PS5's native audio output; stereo still works.
+- All Speakers plays music and menus from every speaker (on by default), and Speaker Test plays a tone from one speaker at a time.
+- Detail Distance keeps cars and scenery detailed up to 8 times farther away.
+01.000.000
+- The first release: Need for Speed: Underground, the original Xbox version, as a native PS5 app, in 4K at up to 60 fps.

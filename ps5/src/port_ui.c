@@ -80,6 +80,7 @@ const char *nfsu1_port_lang_name(int kind,int choice)
     return kind>=0&&kind<KINDS&&s_lang_name[kind][0]?s_lang_name[kind][choice!=0]:"";
 }
 int nfsu1_port_lang_choice(int kind){return kind>=0&&kind<KINDS?s_chosen[kind]:0;}
+int nfsu1_port_lang_active(int kind){return kind>=0&&kind<KINDS?s_active[kind]:0;}
 const char *nfsu1_port_lang_kind_name(int kind){return kind>=0&&kind<KINDS?s_kind[kind]:"";}
 void nfsu1_port_lang_choose(int kind,int choice,int at_start)
 {
