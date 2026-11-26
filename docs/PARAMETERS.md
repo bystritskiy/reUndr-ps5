@@ -2,7 +2,7 @@
 
 All of these are proposals and opt-in, except `RECOMP_FAST_TIME`, which this PR proposes to turn on by
 default. With nothing set, every other switch keeps the original behaviour. Set them as `KEY=VALUE`
-lines in `/data/nfsu1/PPSA99025/nfsu1_env.txt`; they are read once at start. Values outside the listed
+lines in `/data/reUndr/nfsu1_env.txt`; they are read once at start. Values outside the listed
 range fall back to the default unless the row says otherwise.
 
 Background: [PERFORMANCE.md](PERFORMANCE.md) (why the clock and TLS changes), [GRAPHICS.md](GRAPHICS.md)
@@ -44,7 +44,7 @@ they draw that exact pass.
 
 | Switch | Default | Values | What it does | Cost | When to change |
 |---|---|---|---|---|---|
-| `NFSU1_HD_DIR` | `hd` beside the game folder (existing), e.g. `/data/nfsu1/hd`; else `/app0/hd` | a folder | Where `manifest.bin` and the replacement files are read from. Only one pack is loaded. | - | Only if the pack is somewhere else. |
+| `NFSU1_HD_DIR` | `hd` beside the game folder (existing), e.g. `/data/reUndr/hd`; else `/app0/hd` | a folder | Where `manifest.bin` and the replacement files are read from. Only one pack is loaded. | - | Only if the pack is somewhere else. |
 | `NFSU1_HD_PRELOAD` | 0 (off) | 0, 1 | Reads every NHD2 (`.dxtc`) file of the pack into RAM on a background thread at start, so a texture first seen in a race costs a memory copy instead of a disk read inside the frame. Log: `[HD] Preloaded N files, M MB`. | RAM equal to the pack's `.dxtc` files (533 MB for the full pack described in HD_PACK_WORKFLOW.md). | Turn on with any large pack. |
 | `NFSU1_HD_P8` | 0 (off) | 0, 1 | Also looks up palettised P8 (0x0B) textures in the pack, keyed by the index bytes plus the palette in use; a changed palette (paint, blinking) never matches, so the game's own texture is used. | One hash of the indices and palette when a P8 texture's cache entry changes (cost on the console not measured). | Turn on when the pack has P8 entries (road surface, foliage, many props). |
 | `NFSU1_HD_DUMP` | unset (existing) | a folder | Writes each texture of 128x128 or more that has no replacement once, to see what a screen is made of. With `NFSU1_HD_P8=1` P8 textures are dumped too. | Disk writes while on. | Only for making packs. |
@@ -58,7 +58,7 @@ RECOMP_FLARE_GLARE=1
 RECOMP_FLARE_GLARE_THRESHOLD=0.08
 RECOMP_VK_CUBE_UP=1.5
 RECOMP_VK_LOD_BIAS=0
-NFSU1_HD_DIR=/data/nfsu1/hd
+NFSU1_HD_DIR=/data/reUndr/hd
 NFSU1_HD_PRELOAD=1
 NFSU1_HD_P8=1
 ```

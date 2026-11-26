@@ -29,6 +29,18 @@ add_library(nfsu1_runtime STATIC ${runtime})
 add_library(nfsu1_game STATIC "${ROOT}/upstream/src/main.c" "${ROOT}/upstream/src/recomp_manual.c"
  "${ROOT}/upstream/src/nfsu1_extras.c" ${generated})
 add_library(nfsu1_host STATIC src/memory_ps5.c src/input_ps5.c src/pad_map.c src/audio_ps5.c src/audio_native.c src/port_ui.c src/sha256.c src/xbe_check.c src/hd_textures.c src/fmv_replace.c src/fmv_video.c src/disc_image.c src/ui_text.c src/screen_ps5.c)
+set(IMGUI "${CMAKE_CURRENT_SOURCE_DIR}/third_party/imgui")
+add_library(nfsu1_port STATIC src/port_menu.cpp "${IMGUI}/imgui.cpp" "${IMGUI}/imgui_draw.cpp"
+ "${IMGUI}/imgui_tables.cpp" "${IMGUI}/imgui_widgets.cpp" "${IMGUI}/backends/imgui_impl_vulkan.cpp")
+target_compile_definitions(nfsu1_port PRIVATE NFSU1_PS5=1 NFSU2_VULKAN=1 IMGUI_DISABLE_FILE_FUNCTIONS
+ IMGUI_DISABLE_OBSOLETE_FUNCTIONS "NFSU1_PORT_FONT=\"${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/Roboto-Medium.ttf\""
+ "NFSU1_WHATS_NEW=\"${CMAKE_CURRENT_SOURCE_DIR}/release/whats_new.txt\"")
+target_compile_options(nfsu1_port PRIVATE -std=c++20 -O2 -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections)
+target_include_directories(nfsu1_port PRIVATE compat src "${IMGUI}" "${RT}/platform" "${RT}/nv2a_vk" "${ROOT}/upstream/src"
+ "${ROOT}/upstream/xboxrecomp/include" "${RT}" "${PS5_DEPS}/PS5_Mesa/include"
+ "${PS5_DEPS}/PS5_Vulkan/.deps/native/ps5-payload-sdk/target/include")
+set_source_files_properties(src/port_menu.cpp PROPERTIES OBJECT_DEPENDS
+ "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/Roboto-Medium.ttf;${CMAKE_CURRENT_SOURCE_DIR}/release/whats_new.txt")
 add_library(nfsu1_start OBJECT src/native_start.c src/main_ps5.c "${ROOT}/build/vulkan_shim.c")
 foreach(t nfsu1_runtime nfsu1_game nfsu1_host nfsu1_start)
  target_compile_definitions(${t} PRIVATE NFSU1_PS5=1 NFSU1_PS5_DIRECT_MEMORY=1 NFSU2_VULKAN=1)

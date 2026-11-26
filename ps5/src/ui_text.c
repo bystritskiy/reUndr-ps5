@@ -2,6 +2,7 @@
  * strings; the disc's text files are read at start and rewritten into the data
  * folder, and the path layer opens those copies instead. MIT. */
 #include "ui_text.h"
+#include "port_ui.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -149,8 +150,10 @@ void nfsu1_ui_text_prepare(const char *game_dir,const char *cache_dir)
  }
 }
 
+/* The second language's files (port_ui.c) win over the disc's. */
 void nfsu1_ui_text_redirect(char *path,size_t size)
 {
+ nfsu1_port_lang_redirect(path,size);
  for(size_t i=0;i<FILE_COUNT;i++)
   if(sources[i][0]&&!strcasecmp(path,sources[i])) { snprintf(path,size,"%s",copies[i]);return; }
 }

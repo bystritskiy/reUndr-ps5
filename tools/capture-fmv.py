@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TITLE = 'PPSA99025'
 MOVIES = '/data/homebrew/'+TITLE+'/game/MOVIES/'
-DATA = '/data/nfsu1/'+TITLE+'/'
+DATA = '/data/reUndr/'
 ENV = DATA+'nfsu1_env.txt'
 CAPTURE = DATA+'fmv-capture.txt'
 SOURCE = ROOT/'source/Need For Speed Underground/MOVIES'

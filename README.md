@@ -92,21 +92,21 @@ You still need to provide your own disc files as described below.
 1. **The app.** Download `PPSA99025-<version>.zip` from
    [Releases](../../releases/latest), unpack it, and copy the `PPSA99025` folder to
    `/data/homebrew/` on the console. The **reUndr** tile appears on the home screen.
-2. **Your disc.** Copy your disc image to `/data/nfsu1/` on the console, or to the top of a USB
-   drive or its `nfsu1` folder. A trimmed image and a full dump both work.
-3. **Play.** Start the tile. The first start unpacks the image to `/data/nfsu1/game`, and then the
+2. **Your disc.** Copy your disc image to `/data/reUndr/` on the console, or to the top of a USB
+   drive or its `reUndr` folder. A trimmed image and a full dump both work.
+3. **Play.** Start the tile. The first start unpacks the image to `/data/reUndr/game`, and then the
    game starts. After that you can delete the `.iso`.
 
 <p align="center"><img src="docs/media/unpack.jpg" alt="The first-start screen: Unpacking your disc image, 23%" width="60%"></p>
 
 If the disc is missing, the app says so on screen and tells you where things go.
 
-**Already have the files?** Copy them to `/data/nfsu1/game`, or to `nfsu1/game` on a USB drive
-(`/mnt/usb0/nfsu1/game` to `/mnt/usb7/nfsu1/game`), so that `default.xbe` sits next to `CARS`,
+**Already have the files?** Copy them to `/data/reUndr/game`, or to `reUndr/game` on a USB drive
+(`/mnt/usb0/reUndr/game` to `/mnt/usb7/reUndr/game`), so that `default.xbe` sits next to `CARS`,
 `TRACKS`, `FRONTEND`, `GLOBAL`, `SOUND`, `MOVIES`, `LANGUAGES` and `MEMCARD`.
 
 **To update,** copy the new `PPSA99025` folder over the old one. Your saves, settings and game files
-in `/data/nfsu1/` are kept.
+in `/data/reUndr/` are kept.
 
 ### HD logos and icons (optional)
 
@@ -120,7 +120,7 @@ python3 tools/prepare-disc.py --game <your disc.iso> --out <folder>
 ```
 
 It needs a copy of this repository, plus `potrace` and `cairo` (`brew install potrace cairo` on a
-Mac). Copy `<folder>/nfsu1/hd` to `/data/nfsu1/hd`, or to `nfsu1/hd` on the USB drive that holds
+Mac). Copy `<folder>/reUndr/hd` to `/data/reUndr/hd`, or to `reUndr/hd` on the USB drive that holds
 the game.
 
 ## Controls
@@ -141,11 +141,13 @@ merges two controllers into one, doesn't add a player.
 
 ## Settings
 
-Options → Port Settings (Camera in the original game) has render scale, FXAA, filtering,
-reflections, LOD distance (8x by default), All Speakers (on by default) and a speaker test that
-plays a tone from one speaker at a time. Settings saved in the game override the configuration file below.
+Press **Touchpad + Options** during the game for the port menu. It has render scale, FXAA,
+filtering, reflections, detail distance (8x by default), All Speakers (on by default), a speaker
+test that plays a tone from one speaker at a time, the frame rate, a performance overlay and a
+60-second benchmark; changes apply at once. Options → Port Settings (Camera in the original
+game) has the picture and sound rows too. Saved settings override the configuration file below.
 
-`/data/nfsu1/PPSA99025/nfsu1_env.txt` is optional and holds `KEY=VALUE` lines read at start:
+`/data/reUndr/nfsu1_env.txt` is optional and holds `KEY=VALUE` lines read at start:
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -164,13 +166,14 @@ Performance and picture options, all optional, are listed in [docs/PARAMETERS.md
 
 ## Your files
 
-Everything reUndr writes is in `/data/nfsu1/PPSA99025/`: saves, settings, shader caches and logs.
-The app folder holds only the program, its artwork and its licences.
+Everything reUndr writes is in `/data/reUndr/`: saves, settings, shader caches and logs.
+The app folder holds only the program, its artwork and its licences. Version 01.001.000 kept your
+files in `/data/nfsu1/`; the next start moves them here.
 
 ## Reporting a bug
 
 Open an [issue](../../issues), say what you were doing, what you expected and what happened, and
-attach `/data/nfsu1/PPSA99025/stderr.log` from the console. **Never attach game files or disc
+attach `/data/reUndr/stderr.log` from the console. **Never attach game files or disc
 images.**
 
 ## For developers

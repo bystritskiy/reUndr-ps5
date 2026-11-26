@@ -3,7 +3,7 @@
 
 reUndr runs from the disc as it is. This adds what is drawn over the disc's own
 textures and so cannot ship in the public package: logos, badges and arrows. It
-takes an unpacked disc or a disc image and writes <out>/nfsu1/hd. The disc is only
+takes an unpacked disc or a disc image and writes <out>/reUndr/hd. The disc is only
 read.
 
 Needs potrace and cairo, and tools/requirements.txt.
@@ -108,7 +108,7 @@ def main():
     if not shutil.which('potrace'):
         raise SystemExit('potrace is missing: https://potrace.sourceforge.net')
     game = a.game.resolve()
-    target = a.out.resolve()/'nfsu1'
+    target = a.out.resolve()/'reUndr'
     if (target/'hd/manifest.bin').exists():
         raise SystemExit(f'{target/"hd"} already exists')
     if game.is_file():
@@ -117,7 +117,7 @@ def main():
             build(Path(work), target, a.with_imagegen)
     else:
         build(game, target, a.with_imagegen)
-    print(f'{target/"hd"}: copy this hd folder next to the game, to /data/nfsu1/hd on the console.')
+    print(f'{target/"hd"}: copy this hd folder next to the game, to /data/reUndr/hd on the console.')
 
 
 if __name__ == '__main__':

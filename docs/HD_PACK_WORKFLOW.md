@@ -86,8 +86,8 @@ The scripts are in `tools/hdpack/`; each has `--help`.
 ## Install
 
 Copy the contents of `PACK_FINAL` (`manifest.bin` and the `.dxtc`/`.rgba` files; the `.json` reports are
-not needed) to `/data/nfsu1/hd` on the console, or `nfsu1/hd` on the USB drive that holds the game. In
-`/data/nfsu1/PPSA99025/nfsu1_env.txt`:
+not needed) to `/data/reUndr/hd` on the console, or `reUndr/hd` on the USB drive that holds the game. In
+`/data/reUndr/nfsu1_env.txt`:
 
 ```
 NFSU1_HD_PRELOAD=1

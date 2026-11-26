@@ -24,6 +24,10 @@ dav1d (VideoLAN and dav1d authors, BSD 2-Clause) decodes the upscaled movies. It
 built unmodified from the pinned revision by `tools/build-dav1d.py` and linked into
 the executable; its licence accompanies the build as `dav1d-BSD.txt`.
 
+The port menu uses Dear ImGui 1.92.9 (MIT, `ps5/third_party/imgui`) and the
+Roboto Medium font (Apache-2.0, `ps5/third_party/fonts`), both unmodified and
+built into the program; their licences accompany the build.
+
 The `hd/` folder of the public package holds the port's own art: PlayStation button icons
 and a DualSense diagram from `ps5/assets/`, Conduit-style letters and signs drawn from
 the strokes in `tools/font_strokes.py`, and Liberation Sans. No pixel of the disc is in
