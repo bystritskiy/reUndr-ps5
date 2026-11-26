@@ -1,3 +1,5 @@
+01.002.001
+- The game's Options menu is the original again. Port settings are only in the port menu.
 01.002.000
 - Port menu: press Touchpad + Options during the game. Graphics, sound and frame rate settings are in one place and apply at once.
 - Performance overlay and a 60-second benchmark.
