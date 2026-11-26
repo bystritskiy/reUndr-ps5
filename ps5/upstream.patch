@@ -1,5 +1,5 @@
 diff --git a/src/main.c b/src/main.c
-index ad4c36c..7162610 100644
+index ad4c36c..d05c998 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -1,5 +1,5 @@
@@ -9,18 +9,46 @@ index ad4c36c..7162610 100644
   *
   * Boot order (same on every host):
   *   crash reporter -> load default.xbe -> xbox_MemoryLayoutInit ->
-@@ -157,7 +157,7 @@ static void install_crash_reporter(void)
+@@ -157,24 +157,44 @@ static void install_crash_reporter(void)
  /* The CPU exception handler is in switch_nx.c; it calls print_guest_state. */
  static void install_crash_reporter(void) {}
  #else
 -#include <execinfo.h>
 +/* PS5 has no execinfo. */
++#include <pthread.h>
++#include <time.h>
++#ifdef __PROSPERO__
++#  include <sys/ucontext.h>
++#endif
++
++/* The real log file behind stderr when stderr is a pipe to a writer thread
++ * (PS5: ps5/src/main_ps5.c sets it); -1 elsewhere. */
++int g_crash_log_fd = -1;
  
  static void crash_signal(int sig, siginfo_t *si, void *uc)
  {
-@@ -166,15 +166,7 @@ static void crash_signal(int sig, siginfo_t *si, void *uc)
+-    (void)uc;
++    if (g_crash_log_fd >= 0) {
++        /* Let the writer thread drain the pipe, then write past it: the
++         * process dies before the writer would see the report. */
++        struct timespec ts = { 0, 150 * 1000 * 1000 };
++        fflush(stderr);
++        nanosleep(&ts, NULL);
++        dup2(g_crash_log_fd, fileno(stderr));
++        setvbuf(stderr, NULL, _IONBF, 0);
++    }
+     fprintf(stderr, "[CRASH] signal %d, fault addr %p (guest VA 0x%08X)\n",
              sig, si->si_addr,
              (uint32_t)((uintptr_t)si->si_addr - (uintptr_t)g_xbox_mem_offset));
++    /* The load slide: symbolize rip offline as rip - base + nm address. */
++    fprintf(stderr, "[CRASH] base print_guest_state=%p thread=%p\n",
++            (void *)print_guest_state, (void *)pthread_self());
++#ifdef __PROSPERO__
++    fprintf(stderr, "[CRASH] rip=%p\n",
++            (void *)((ucontext_t *)uc)->uc_mcontext.mc_rip);
++#else
++    (void)uc;   /* Linux needs _GNU_SOURCE for REG_RIP; the host has gdb. */
++#endif
      print_guest_state();
 -    {
 -        /* The host frames name the lifted function (sub_XXXXXXXX) that
@@ -31,11 +59,21 @@ index ad4c36c..7162610 100644
 -        fflush(stderr);
 -        backtrace_symbols_fd(frames, n, 2);
 -    }
++    if (g_crash_log_fd >= 0)
++        fsync(fileno(stderr));
 +
      signal(sig, SIG_DFL);
      raise(sig);
  }
-@@ -283,7 +275,7 @@ int main(int argc, char **argv)
+@@ -197,6 +217,7 @@ static void install_crash_reporter(void)
+     sigaction(SIGBUS, &sa, NULL);
+     sigaction(SIGILL, &sa, NULL);
+     sigaction(SIGFPE, &sa, NULL);
++    sigaction(SIGABRT, &sa, NULL);   /* vk/pb abort()s; SIG_DFL + raise ends it */
+ }
+ #endif
+ 
+@@ -283,7 +304,7 @@ int main(int argc, char **argv)
      return rc;
  }
  #else
@@ -44,7 +82,7 @@ index ad4c36c..7162610 100644
  {
      (void)argc;
      (void)argv;
-@@ -302,7 +294,7 @@ static int game_main(void)
+@@ -302,7 +323,7 @@ static int game_main(void)
      setvbuf(stdout, NULL, _IONBF, 0);
      setvbuf(stderr, NULL, _IONBF, 0);
  
@@ -53,7 +91,7 @@ index ad4c36c..7162610 100644
      install_crash_reporter();
      if (getenv("NFSU2_EXIT_TRACE"))
          atexit(print_guest_state);
-@@ -422,11 +414,12 @@ static int game_main(void)
+@@ -422,11 +443,12 @@ static int game_main(void)
      xbox_kernel_init();
      /* text patch: NFSU2 only */
      nfsu1_options_load();
@@ -563,10 +601,34 @@ index c0c0548..c00dd55 100644
 +
 +BOOL xbox_ProtectGuestRange(PVOID,SIZE_T,DWORD,PDWORD);
 diff --git a/xboxrecomp/src/kernel/kernel_bridge.c b/xboxrecomp/src/kernel/kernel_bridge.c
-index fafc9c1..7e53ee6 100644
+index fafc9c1..67fa6b8 100644
 --- a/xboxrecomp/src/kernel/kernel_bridge.c
 +++ b/xboxrecomp/src/kernel/kernel_bridge.c
-@@ -8424,7 +8424,7 @@ static void bridge_NtProtectVirtualMemory(void)
+@@ -590,6 +590,9 @@ static int gil_enabled(void)
+         const char *e = getenv("RECOMP_GIL");
+         InitializeCriticalSection(&s_gil_cs);
+         InitializeConditionVariable(&s_gil_cv);
++#if !defined(_WIN32)
++        recomp_fast_time_init();          /* before any guest code reads a clock */
++#endif
+         s_gil_on = !(e && *e == '0');
+         if (s_gil_on)
+             fprintf(stderr, "  [THREAD] guest code serialised under one lock (RECOMP_GIL)\n");
+@@ -3630,7 +3633,12 @@ static const char* bridge_get_xbox_path(uint32_t obj_attrs_va)
+     if (!buf_va) return NULL;
+     /* XDK directory searches pass a counted prefix of "directory\\*".
+      * The byte after Length need not be NUL or part of the object name. */
+-    static RECOMP_TLS char path[65536];
++    /* Heap, not a 64 KB TLS array: native static TLS would give every host
++     * thread (audio, GPU, RADV workers) this buffer.
++     * shortcut: never freed at thread exit (64 KB per exited thread that
++     * opened a path), free it from the thread-exit path if threads churn. */
++    static RECOMP_TLS char *path;
++    if (!path && !(path = malloc(65536))) return NULL;
+     uint16_t length=BRIDGE_MEM16(ansi_str_va);
+     if(length>BRIDGE_MEM16(ansi_str_va+2)) return NULL;
+     /* Length <= MaximumLength says the string is self-consistent; it does not
+@@ -8424,7 +8432,7 @@ static void bridge_NtProtectVirtualMemory(void)
      uint32_t size    = size_ptr ? BRIDGE_MEM32(size_ptr) : 0;
      DWORD old = 0;
  
@@ -813,8 +875,434 @@ index 8cbe820..fa08f52 100644
      if (g_span_base) {
          VirtualFree(g_span_base, g_span_size, MEM_RELEASE);
          g_span_base = NULL;
+diff --git a/xboxrecomp/src/nv2a_vk/flare_fix.h b/xboxrecomp/src/nv2a_vk/flare_fix.h
+new file mode 100644
+index 0000000..c4f9693
+--- /dev/null
++++ b/xboxrecomp/src/nv2a_vk/flare_fix.h
+@@ -0,0 +1,172 @@
++/* FLARE_FIX -- NFSU1 light trails at 30 Hz while the game renders at 60.
++ *
++ * NFSU1 draws its light halos (car lights, street lamps) through a trail
++ * buffer, a 640x480 colour surface that is never cleared. Every rendered
++ * frame (sub_00015370, BLENDCOLOR set at 0x153B4):
++ *   1. decay:  full-screen quad, blend ZERO / CONSTANT_COLOR with blend
++ *              colour 0x008296B4 -> buffer *= (0.51, 0.59, 0.71);
++ *   2. flares: the light-flare quads, SRC_ALPHA / ONE, depth-tested against
++ *              the scene's Z;
++ *   3. bloom:  the blurred quarter-size scene, CONSTANT_ALPHA (0xAA) / ONE;
++ *   4. the buffer is added onto the frame, ONE / ONE.
++ * Steps 1-3 run per frame, so the trail's length and weight were tuned for
++ * the Xbox's 30 fps. At 60 fps (uncapped flip interval) a moving light
++ * leaves its decaying copies twice as close together: they overlap into a
++ * bigger, brighter blob -- oncoming headlights most of all.
++ *
++ * RECOMP_FLARE_FIX=1: steps 1-3 run every frame (the newest flare is always
++ * this frame's, so the halo sits on the lamp: no judder), and the decay
++ * colour is set per frame from the real frame time, k_frame =
++ * k'^(dt / 33.3 ms) per channel (k' below; 2.5 ms <= dt <= 100 ms), so the
++ * trail lasts the same time at any frame rate.
++ * =3 (the first version, kept for A/B): steps 1-3 once per 33.3 ms of real
++ * time and skipped otherwise, step 4 every frame. At 60 fps the halo is
++ * 16 ms old on every second frame and the cadence follows vsync jitter --
++ * with a short trail that flickers. =2: as 3, every second frame regardless
++ * of time (slow hosts). Default 0: behaviour unchanged.
++ *
++ * Trail shape (with the fix on; only the decay colour of step 1 changes, no
++ * extra pass, the newest flare keeps full intensity). A copy left n updates
++ * ago weighs k^n (k = the decay colour per channel), so it falls below a
++ * visibility threshold e after n = ln(e) / ln(k) updates.
++ *   RECOMP_FLARE_TRAIL=t (default 0.10; 1 = the Xbox's, i.e. the first
++ *     FLARE_FIX build): decay k^(1/t) gives n' = t * n, exactly t times
++ *     the length.
++ *   RECOMP_FLARE_TRAIL_OPACITY=o (default 0.7; 1 = none): every older copy
++ *     a further factor o per update, so copy n weighs (o * k^(1/t))^n.
++ * Decay colour k' = o * k^(1/t), instead of k = (0.510, 0.588, 0.706).
++ * Defaults (t 0.10, o 0.7): k' = (0.0008, 0.0035, 0.021), blend colour
++ * 0x00000105 -- the previous copy keeps 0.1 / 0.4 / 2 % (Xbox 51 / 59 /
++ * 71 %): practically no trail. t 0.25, o 0.7: (0.047, 0.084, 0.174),
++ * 0x000C152C. t 0.5, o 1: (0.260, 0.346, 0.498), 0x0042587F. Side effect:
++ * a light that stays put builds up to F / (1 - k') instead of F / (1 - k):
++ * with the defaults its halo is the newest flare alone, 0.49 / 0.41 / 0.30
++ * of the Xbox's per channel (t 0.5, o 1: 0.66 / 0.63 / 0.59).
++ *
++ * The trail surface is recognised by its decay pass, not by address.
++ * Header-only (no build list changes); revert = this file, flare_glare.h
++ * and the FLARE_FIX lines in nv2a_vk.c. */
++#ifndef FLARE_FIX_H
++#define FLARE_FIX_H
++
++#include <math.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#define FLARE_FIX_PERIOD 0.0333333   /* the Xbox's 30 fps, seconds */
++#define FLARE_FIX_DECAY  0x008296B4u /* the title's decay colour (0x153B4) */
++
++static int      s_ff_mode = -1;      /* RECOMP_FLARE_FIX: 0 off, 1 per frame, 2 every 2nd frame, 3 33.3 ms */
++static int      s_ff_glare;          /* RECOMP_FLARE_GLARE: 0 off, 1 on, 2 even frames only (flare_glare.h) */
++static uint32_t s_ff_trail_va;       /* the trail surface, once seen */
++static uint32_t s_ff_trail_frame = ~0u;   /* frame of its last decay pass */
++static uint32_t s_ff_decay = FLARE_FIX_DECAY;
++static double   s_ff_k[3];           /* k' per channel (B, G, R) per 33.3 ms */
++
++static double flare_fix_now(void)
++{
++    struct timespec t;
++    clock_gettime(CLOCK_MONOTONIC, &t);
++    return (double)t.tv_sec + t.tv_nsec / 1e9;
++}
++
++static void flare_fix_init(void)
++{
++    const char *e = getenv("RECOMP_FLARE_FIX");
++    s_ff_mode = e && *e >= '1' && *e <= '3' ? *e - '0' : 0;
++    e = getenv("RECOMP_FLARE_GLARE");
++    s_ff_glare = e && (*e == '1' || *e == '2') ? *e - '0' : 0;
++    if (s_ff_mode) {
++        double t = 0.10, o = 0.7;
++        int i;
++        e = getenv("RECOMP_FLARE_TRAIL");
++        if (e && *e)
++            t = atof(e);
++        if (!(t >= 0.05 && t <= 4.0))
++            t = 0.10;
++        e = getenv("RECOMP_FLARE_TRAIL_OPACITY");
++        if (e && *e)
++            o = atof(e);
++        if (!(o >= 0.0 && o <= 1.0))
++            o = 0.7;
++        s_ff_decay = 0;
++        for (i = 0; i < 24; i += 8) {
++            double k = ((FLARE_FIX_DECAY >> i) & 0xFF) / 255.0;
++            s_ff_k[i / 8] = o * pow(k, 1.0 / t);
++            s_ff_decay |= (uint32_t)lround(255.0 * s_ff_k[i / 8]) << i;
++        }
++        fprintf(stderr, "[flare] trail %s, length x%.2f, opacity %.2f (decay %08X -> %08X per 33.3 ms)\n",
++                s_ff_mode == 1 ? "updated every frame, decay from frame time"
++                : s_ff_mode == 3 ? "updated at 30 Hz (33.3 ms)" : "updated every 2nd frame",
++                t, o, FLARE_FIX_DECAY, s_ff_decay);
++    }
++}
++
++/* 1: drop this draw (a trail-buffer update on a frame that is not a 30 Hz
++ * tick). May point *pb / *pr at a copy with the trail length's decay. */
++static int flare_fix_draw(const Nv2aRawBatch **pb, const uint32_t **pr, uint32_t frame)
++{
++    static int tick;
++    static uint32_t n_frames, n_ticks;
++    static double acc, last, log_t;
++    static Nv2aRawBatch cb;
++    static uint32_t cr[0x2000 / 4];
++    const Nv2aRawBatch *b = *pb;
++    const uint32_t *r = *pr;
++
++    if (s_ff_mode < 0)
++        flare_fix_init();
++    if (!s_ff_mode && !s_ff_glare)
++        return 0;
++    /* The decay pass opens each frame's update of the trail buffer. */
++    if (r[0x304 / 4] && r[0x344 / 4] == 0 && r[0x348 / 4] == 0x8001 && r[0x34C / 4] == FLARE_FIX_DECAY) {
++        if (frame != s_ff_trail_frame) {
++            double now = flare_fix_now();
++            s_ff_trail_va = b->surface.color_va;
++            s_ff_trail_frame = frame;
++            if (s_ff_mode == 2) {
++                tick = !tick;
++            } else if (s_ff_mode == 1) {
++                double dt = last ? now - last : FLARE_FIX_PERIOD;
++                int i;
++                last = now;
++                dt = dt < 0.0025 ? 0.0025 : dt > 0.1 ? 0.1 : dt;
++                s_ff_decay = 0;
++                for (i = 0; i < 3; i++)
++                    s_ff_decay |= (uint32_t)lround(255.0 * pow(s_ff_k[i], dt / FLARE_FIX_PERIOD)) << (8 * i);
++                tick = 1;
++            } else if (s_ff_mode == 3) {
++                acc = last ? acc + (now - last) : FLARE_FIX_PERIOD;
++                last = now;
++                tick = acc >= FLARE_FIX_PERIOD;
++                if (tick)
++                    acc = acc >= 2 * FLARE_FIX_PERIOD ? 0 : acc - FLARE_FIX_PERIOD;
++            } else {
++                tick = 1;                       /* glare only: the title's own cadence */
++            }
++            n_frames++;
++            n_ticks += tick;
++            if (!log_t)
++                log_t = now;
++            if (s_ff_mode && now - log_t >= 10.0) {
++                fprintf(stderr, "[flare] trail %08X updated on %u of %u frames\n", s_ff_trail_va, n_ticks, n_frames);
++                n_frames = n_ticks = 0;
++                log_t = now;
++            }
++        }
++        if (tick && s_ff_decay != FLARE_FIX_DECAY) {
++            memcpy(cr, r, sizeof cr);
++            cr[0x34C / 4] = s_ff_decay;
++            cb = *b;
++            cb.regs = cr;
++            *pb = &cb;
++            *pr = cr;
++        }
++    }
++    return s_ff_mode && !tick && frame == s_ff_trail_frame && b->surface.color_va == s_ff_trail_va;
++}
++
++#endif
+diff --git a/xboxrecomp/src/nv2a_vk/flare_glare.h b/xboxrecomp/src/nv2a_vk/flare_glare.h
+new file mode 100644
+index 0000000..67229f7
+--- /dev/null
++++ b/xboxrecomp/src/nv2a_vk/flare_glare.h
+@@ -0,0 +1,242 @@
++/* FLARE_FIX -- RECOMP_FLARE_GLARE=1 (default 0): a soft warm glare around
++ * the bright lights only.
++ *
++ * Source: the title's light-trail buffer (flare_fix.h), which holds the
++ * light flares and a blurred copy of the scene but not the scene itself,
++ * so street lamps and car lights glare and the rest of the picture does
++ * not. Only its hottest texels count: max(r, g, b) is smoothstep'ed from
++ * the threshold to 1, so a light facing the camera (oncoming headlights,
++ * saturated over a bigger area) glares more than one seen from the side.
++ *
++ * One full-screen pass at flip time, added (ONE / ONE, RGB only) onto the
++ * finished frame before it is presented or dumped -- like the FXAA pass,
++ * outside the title's own draws, so no per-draw CPU work and no state the
++ * title's draws rely on is touched. Per pixel: four short streaks (+-x, +-y,
++ * 8 taps each, quadratic fall-off) and a ring of 8 taps for the halo, tinted
++ * warm white (1.0, 0.95, 0.8). Offsets are in the title's pixels, so the
++ * look does not change with the resolution scale.
++ *
++ * =2: even frames only, an A/B in one run for slow hosts (dump every odd
++ * number of frames).
++ *
++ * Tunables (read once):
++ *   RECOMP_FLARE_GLARE_STRENGTH  streaks, 0.5     (0 = none)
++ *   RECOMP_FLARE_GLARE_LENGTH    streak length, title pixels, 20
++ *   RECOMP_FLARE_GLARE_HALO      halo, 0.3
++ *   RECOMP_FLARE_GLARE_RADIUS    halo radius, title pixels, 5
++ *   RECOMP_FLARE_GLARE_THRESHOLD trail brightness that starts to glare, 0.2
++ * Included after present_fxaa in nv2a_vk.c (uses its statics). */
++#ifndef FLARE_GLARE_H
++#define FLARE_GLARE_H
++
++static const char s_fg_fs[] =
++    "#version 450\n"
++    "layout(set = 0, binding = 0) uniform sampler2D trail;\n"
++    "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"   /* a: px, strength, length; b: threshold, halo, radius */
++    "layout(location = 0) out vec4 o;\n"
++    "vec3 hot(vec2 uv) {\n"
++    "    vec3 c = textureLod(trail, uv, 0.0).rgb;\n"
++    "    return c * smoothstep(pc.b.x, 1.0, max(c.r, max(c.g, c.b)));\n"
++    "}\n"
++    "void main() {\n"
++    "    vec2 uv = gl_FragCoord.xy / vec2(textureSize(trail, 0));\n"
++    "    vec2 px = pc.a.xy;\n"
++    "    const vec2 D[4] = vec2[](vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));\n"
++    "    vec3 s = vec3(0.0), h = vec3(0.0);\n"
++    "    for (int d = 0; d < 4; d++)\n"
++    "        for (int i = 1; i <= 8; i++) {\n"
++    "            float t = float(i) / 8.0;\n"
++    "            s += hot(uv + D[d] * (t * pc.a.w) * px) * ((1.0 - t) * (1.0 - t));\n"
++    "        }\n"
++    "    for (int i = 0; i < 8; i++) {\n"
++    "        float a = float(i) * 0.7853982;\n"
++    "        h += hot(uv + vec2(cos(a), sin(a)) * pc.b.z * px);\n"
++    "    }\n"
++    /* 4 rays x sum((1 - i/8)^2) = 4 x 2.1875: a saturated area adds `strength`. */
++    "    vec3 g = s * (pc.a.z / 8.75) + h * (pc.b.y / 8.0);\n"
++    "    o = vec4(g * vec3(1.0, 0.95, 0.8), 0.0);\n"
++    "}\n";
++
++static float flare_glare_env(const char *name, float def)
++{
++    const char *e = getenv(name);
++    float v = e && *e ? (float)atof(e) : def;
++    return v >= 0.0f && v < 1000.0f ? v : def;
++}
++
++static VkPipeline flare_glare_pipe(VkPipelineLayout *lay)
++{
++    static VkDescriptorSetLayout dsl;
++    static VkPipelineLayout pl;
++    static VkPipeline pipe;
++    static int failed;
++    VkDescriptorSetLayoutBinding bd = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
++                                        VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
++    VkDescriptorSetLayoutCreateInfo lci = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
++    VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32 };
++    VkPipelineLayoutCreateInfo pli = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
++    VkGraphicsPipelineCreateInfo ci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
++    VkPipelineShaderStageCreateInfo st[2];
++    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
++    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
++    VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
++    VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
++    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
++    VkPipelineColorBlendAttachmentState ba;
++    VkPipelineColorBlendStateCreateInfo cb = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
++    VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
++    VkPipelineRenderingCreateInfo rci = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
++    static const VkDynamicState dyn[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
++    VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;   /* every title surface (surf_get) */
++    VkShaderModule vs, fs;
++
++    *lay = pl;
++    if (pipe || failed)
++        return pipe;
++    failed = 1;
++    lci.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
++    lci.bindingCount = 1;
++    lci.pBindings = &bd;
++    if (vkCreateDescriptorSetLayout(s_dev, &lci, NULL, &dsl) != VK_SUCCESS)
++        return VK_NULL_HANDLE;
++    pli.setLayoutCount = 1;
++    pli.pSetLayouts = &dsl;
++    pli.pushConstantRangeCount = 1;
++    pli.pPushConstantRanges = &pr;
++    if (vkCreatePipelineLayout(s_dev, &pli, NULL, &pl) != VK_SUCCESS)
++        return VK_NULL_HANDLE;
++    vs = compile(GLSLANG_STAGE_VERTEX, s_pp_vs);
++    fs = compile(GLSLANG_STAGE_FRAGMENT, s_fg_fs);
++    if (vs && fs) {
++        memset(st, 0, sizeof st);
++        st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
++        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
++        st[0].module = vs;
++        st[0].pName = "main";
++        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
++        st[1].module = fs;
++        st[1].pName = "main";
++        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
++        vp.viewportCount = vp.scissorCount = 1;
++        rs.polygonMode = VK_POLYGON_MODE_FILL;
++        rs.lineWidth = 1.0f;
++        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
++        memset(&ba, 0, sizeof ba);
++        ba.blendEnable = VK_TRUE;
++        ba.srcColorBlendFactor = ba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
++        ba.colorBlendOp = VK_BLEND_OP_ADD;
++        ba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
++        ba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
++        ba.alphaBlendOp = VK_BLEND_OP_ADD;
++        ba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT;
++        cb.attachmentCount = 1;
++        cb.pAttachments = &ba;
++        dy.dynamicStateCount = 2;
++        dy.pDynamicStates = dyn;
++        rci.colorAttachmentCount = 1;
++        rci.pColorAttachmentFormats = &fmt;
++        ci.pNext = &rci;
++        ci.stageCount = 2;
++        ci.pStages = st;
++        ci.pVertexInputState = &vi;
++        ci.pInputAssemblyState = &ia;
++        ci.pViewportState = &vp;
++        ci.pRasterizationState = &rs;
++        ci.pMultisampleState = &ms;
++        ci.pColorBlendState = &cb;
++        ci.pDynamicState = &dy;
++        ci.layout = pl;
++        if (vkCreateGraphicsPipelines(s_dev, s_pcache, 1, &ci, NULL, &pipe) != VK_SUCCESS)
++            pipe = VK_NULL_HANDLE;
++    }
++    if (vs) vkDestroyShaderModule(s_dev, vs, NULL);
++    if (fs) vkDestroyShaderModule(s_dev, fs, NULL);
++    if (!pipe)
++        LOGE("[flare] glare pipeline failed; glare off\n");
++    failed = !pipe;
++    *lay = pl;
++    return pipe;
++}
++
++/* At flip, s = the surface about to be presented (or dumped). */
++static void flare_glare(VkSurf *s)
++{
++    static float pc[8];
++    static VkSampler smp;
++    VkPipelineLayout lay;
++    VkPipeline pipe;
++    VkSurf *t;
++    VkRenderingAttachmentInfo ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
++    VkRenderingInfo ri = { VK_STRUCTURE_TYPE_RENDERING_INFO };
++    VkViewport vp;
++    VkRect2D sc;
++    VkDescriptorImageInfo ii;
++    VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
++
++    /* The trail was updated in the frame this flip ends (vk_flip has
++     * already counted the new one). */
++    if (!s_ff_glare || !s || s_ff_trail_frame + 1 != s_frame || (s_ff_glare == 2 && (s_frame & 1)))
++        return;
++    t = surf_find(s_ff_trail_va);
++    if (!t || t == s || t->w != s->w || t->h != s->h)
++        return;
++    pipe = flare_glare_pipe(&lay);
++    if (!pipe)
++        return;
++    if (!smp) {
++        VkSamplerCreateInfo sci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
++        sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
++        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++        if (vkCreateSampler(s_dev, &sci, NULL, &smp) != VK_SUCCESS)
++            return;
++        pc[2] = flare_glare_env("RECOMP_FLARE_GLARE_STRENGTH", 0.5f);
++        pc[3] = flare_glare_env("RECOMP_FLARE_GLARE_LENGTH", 20.0f);
++        pc[4] = flare_glare_env("RECOMP_FLARE_GLARE_THRESHOLD", 0.2f);
++        pc[5] = flare_glare_env("RECOMP_FLARE_GLARE_HALO", 0.3f);
++        pc[6] = flare_glare_env("RECOMP_FLARE_GLARE_RADIUS", 5.0f);
++        if (pc[4] > 0.99f)
++            pc[4] = 0.99f;
++        fprintf(stderr, "[flare] glare on: strength %.2f length %.0f halo %.2f radius %.0f threshold %.2f\n",
++                pc[2], pc[3], pc[5], pc[6], pc[4]);
++    }
++    pc[0] = 1.0f / (float)t->w;
++    pc[1] = 1.0f / (float)t->h;
++    end_rendering();
++    barrier_all();
++    ca.imageView = s->view;
++    ca.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
++    ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
++    ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
++    ri.renderArea.extent.width = s->pw;
++    ri.renderArea.extent.height = s->ph;
++    ri.layerCount = 1;
++    ri.colorAttachmentCount = 1;
++    ri.pColorAttachments = &ca;
++    p_begin_rendering(s_cb, &ri);
++    vkCmdBindPipeline(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
++    vp.x = vp.y = 0.0f;
++    vp.width = (float)s->pw;
++    vp.height = (float)s->ph;
++    vp.minDepth = 0.0f;
++    vp.maxDepth = 1.0f;
++    sc.offset.x = sc.offset.y = 0;
++    sc.extent.width = s->pw;
++    sc.extent.height = s->ph;
++    vkCmdSetViewport(s_cb, 0, 1, &vp);
++    vkCmdSetScissor(s_cb, 0, 1, &sc);
++    ii.sampler = smp;
++    ii.imageView = t->view;
++    ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
++    wr.dstBinding = 0;
++    wr.descriptorCount = 1;
++    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
++    wr.pImageInfo = &ii;
++    p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, lay, 0, 1, &wr);
++    vkCmdPushConstants(s_cb, lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
++    vkCmdDraw(s_cb, 3, 1, 0, 0);
++    p_end_rendering(s_cb);
++    barrier_all();
++    s_dyn_valid = 0;
++}
++
++#endif
 diff --git a/xboxrecomp/src/nv2a_vk/nv2a_vk.c b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
-index 773dd12..e6e7887 100644
+index 773dd12..629f2cd 100644
 --- a/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 +++ b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 @@ -29,7 +29,7 @@
@@ -826,7 +1314,19 @@ index 773dd12..e6e7887 100644
   *   RECOMP_GL_SCALE_X=<k>            horizontal scale, if not the same
   *   RECOMP_VK_SQUARE=0               widescreen without 4/3 more columns on
   *                                    surfaces without horizontal AA
-@@ -54,8 +54,8 @@
+@@ -40,6 +40,11 @@
+  *                                    (default -0.25: a little sharper)
+  *   RECOMP_VK_FXAA=0                 present with a plain blit, no FXAA
+  *   RECOMP_VK_FXAA_SUBPIX=<s>        FXAA sub-pixel smoothing 0..1 (0.25)
++ *   RECOMP_VK_SSAA=<k>               supersampling: surfaces at k times the
++ *                                    render scale (1..2, default 1 = off),
++ *                                    filtered down in the present pass
++ *   RECOMP_VK_CUBE_UP=<m>            car reflection cube faces at m times the
++ *                                    render scale (1..4, default 1 = off)
+  *   RECOMP_VK_VALIDATION=1           (Linux) enable the Khronos validation layer
+  *   RECOMP_VK_HEADLESS=1             (Linux) no window, no present
+  */
+@@ -54,8 +59,8 @@
  #endif
  #include <vulkan/vulkan.h>
  #if !defined(__SWITCH__)
@@ -837,7 +1337,7 @@ index 773dd12..e6e7887 100644
  #endif
  #include <glslang/Include/glslang_c_interface.h>
  #include <glslang/Public/resource_limits_c.h>
-@@ -65,6 +65,12 @@
+@@ -65,6 +70,13 @@
  #include <stdlib.h>
  #include <string.h>
  #include <time.h>
@@ -846,11 +1346,101 @@ index 773dd12..e6e7887 100644
 +#include <sys/stat.h>
 +#include "hd_textures.h"
 +#include "fmv_replace.h"
++#include "flare_fix.h"   /* FLARE_FIX */
 +#endif
  
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
-@@ -884,6 +890,7 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
+@@ -310,6 +322,10 @@ typedef struct {
+  * RECOMP_VK_SQUARE=0 off; RECOMP_GL_SCALE_X overrides it. */
+ static double   s_scale = 1.0, s_scale_x = 1.0, s_xratio = 1.0;
+ static int      s_square, s_square_env;
++/* RECOMP_VK_SSAA: every surface's stored size times this on top of the scale
++ * (the game's menu and RECOMP_GL_SCALE keep their meaning); the present pass
++ * filters it down to the output (present_fxaa, mode 1/2). */
++static double   s_ssaa = 1.0;
+ 
+ /* Picture options set at run time (NFSU2: Options -> Video), read by the
+  * renderer: FXAA on/off (at every present), anisotropic level 1..16 (per
+@@ -326,11 +342,55 @@ static uint32_t s_max_size = 4096;
+  * flip (rescale_surfaces). */
+ volatile int nv2a_vk_scale_pct;
+ 
+-/* The stored size of a w x h surface at the current scale, capped per axis
+- * by the device's image limits. */
+-static void stored_size(uint32_t w, uint32_t h, uint32_t aa_sx, uint32_t *pw, uint32_t *ph)
++/* RECOMP_VK_CUBE_UP=<m> (default 1 = off, up to 4): the faces of a
++ * render-to-cube reflection map (the car reflections) get m times the render
++ * scale -- sharper reflections. A surface becomes a face when a cube map is
++ * bound over its address (cube_note_face); the next flip rebuilds it
++ * (rescale_surfaces) and cube_from_surfaces sizes the cube from it. */
++static double   s_cube_up = -1.0;
++static uint32_t s_cube_va[32];
++static int      s_ncube_va, s_cube_pending;
++static int cube_face_va(uint32_t va)
++{
++    int i;
++    for (i = 0; i < s_ncube_va; i++)
++        if (s_cube_va[i] == va) return 1;
++    return 0;
++}
++static void cube_up_init(void)
++{
++    const char *e = getenv("RECOMP_VK_CUBE_UP");
++    s_cube_up = e ? atof(e) : 1.0;
++    if (!(s_cube_up > 1.0)) s_cube_up = 1.0;
++    if (s_cube_up > 4.0) s_cube_up = 4.0;
++    fprintf(stderr, "  [VK] reflection cube faces at %gx the render scale (RECOMP_VK_CUBE_UP)%s\n",
++            s_cube_up, s_cube_up > 1.0 ? "" : ", off");
++}
++static void cube_note_face(uint32_t va)
++{
++    if (s_cube_up < 0.0) cube_up_init();
++    if (s_cube_up <= 1.0 || cube_face_va(va) || s_ncube_va >= 32) return;
++    s_cube_va[s_ncube_va++] = va;
++    s_cube_pending = 1;
++}
++/* vk_flip: faces found since the last flip need rebuilding (rescale_surfaces). */
++static int cube_resize_due(void)
++{
++    int r = s_cube_pending;
++    s_cube_pending = 0;
++    return r;
++}
++
++/* The stored size of a w x h surface at the current scale (times RECOMP_VK_SSAA,
++ * and RECOMP_VK_CUBE_UP for a reflection face), capped per axis by the
++ * device's image limits. */
++static void stored_size(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uint32_t *pw, uint32_t *ph)
+ {
+-    double kx = s_scale_x * (s_square && aa_sx <= 1 ? 4.0 / 3.0 : 1.0), ky = s_scale;
++    double sxk = s_scale_x * s_ssaa, syk = s_scale * s_ssaa, kx, ky;
++    if (cube_face_va(va)) {                 /* only listed with CUBE_UP set */
++        sxk *= s_cube_up; syk *= s_cube_up;
++    }
++    kx = sxk * (s_square && aa_sx <= 1 ? 4.0 / 3.0 : 1.0); ky = syk;
+     if (w * kx > (double)s_max_size)
+         kx = (double)s_max_size / w;
+     if (h * ky > (double)s_max_size)
+@@ -745,7 +805,7 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
+     memset(s, 0, sizeof *s);
+     s->va = va; s->w = w; s->h = h; s->used = s_frame;
+     s->aa_sx = aa_sx; s->aa_sy = aa_sy;
+-    stored_size(w, h, aa_sx, &s->pw, &s->ph);
++    stored_size(va, w, h, aa_sx, &s->pw, &s->ph);
+     if (!make_image(s->pw, s->ph, VK_FORMAT_B8G8R8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+@@ -781,7 +841,7 @@ static void rescale_surfaces(double k)
+         uint32_t pw, ph;
+         if (!s->image)
+             continue;
+-        stored_size(s->w, s->h, s->aa_sx, &pw, &ph);
++        stored_size(s->va, s->w, s->h, s->aa_sx, &pw, &ph);
+         if (pw == s->pw && ph == s->ph)
+             continue;
+         if (!make_image(pw, ph, VK_FORMAT_B8G8R8A8_UNORM,
+@@ -884,11 +944,13 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
  
  typedef struct {
      uint32_t va, color, w, h, pitch, hash, bytes;
@@ -858,7 +1448,13 @@ index 773dd12..e6e7887 100644
      uint32_t face;              /* cube map: bytes per face; 0 = 2D */
      uint32_t levels;            /* mip levels in the image */
      VkImage image; VkImageView view; VkDeviceMemory mem;
-@@ -1078,8 +1085,8 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
+     VkFormat fmt;
+     uint32_t used, checked;
++    const void *hd;             /* the HD record the image holds, or NULL */
+ } VkTex;
+ 
+ /* RECOMP_VK_MIPS=0: level 0 only (the old look). RECOMP_VK_ANISO=<n>:
+@@ -1078,8 +1140,8 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
      rg.imageSubresource.mipLevel = level;
      rg.imageSubresource.baseArrayLayer = layer;
      rg.imageSubresource.layerCount = 1;
@@ -869,32 +1465,60 @@ index 773dd12..e6e7887 100644
      rg.imageExtent.depth = 1;
      vkCmdCopyBufferToImage(s_cb, s_f->ring, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
  }
-@@ -1221,6 +1228,12 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1221,6 +1283,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
      uint32_t i, hash;
      VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
      uint32_t layers = face ? 6 : 1, f, size;
 +    uint32_t image_w=w, image_h=h, image_levels=levels;
 +    void *hd_pixels=NULL;
++    uint32_t hd_bc=0;                   /* HD pixels are BC blocks of this colour format */
++    const void *hd_hit=NULL;            /* their record */
 +#if defined(NFSU1_PS5)
++    NfsHdPixels hdi;
 +    NfsFmvFrame fmv;
 +    const void *fmv_pixels=NULL;
 +#endif
  
      for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
          VkTex *c = &s_tex[i - 1];
-@@ -1251,7 +1264,26 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1251,7 +1322,51 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
      if (s_have_bc && color == 0x0C) fmt = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
      if (s_have_bc && color == 0x0E) fmt = VK_FORMAT_BC2_UNORM_BLOCK;
      if (s_have_bc && color == 0x0F) fmt = VK_FORMAT_BC3_UNORM_BLOCK;
 -    if (t && (t->fmt != fmt || t->pitch != pitch || t->levels != levels)) {
 +#if defined(NFSU1_PS5)
-+    if (!face && (color==0x0C || color==0x0E || color==0x0F)) {
-+        const NfsHdTexture *hd=nfsu1_hd_find((const uint8_t *)xbox_GetMemoryOffset()+va,
-+            color,w,h,tex_bytes(color,w,h,pitch),hash);
-+        if (hd && (hd_pixels=nfsu1_hd_load(hd))!=NULL) {
++    if (!face && (color==0x0C || color==0x0E || color==0x0F || color==0x0B)) {
++        const uint8_t *mem=(const uint8_t *)xbox_GetMemoryOffset();
++        const NfsHdTexture *hd=NULL;
++        if (color!=0x0B)
++            hd=nfsu1_hd_find(mem+va,color,w,h,tex_bytes(color,w,h,pitch),hash);
++        else if ((s_palette_reg & ~0x3Fu) && w*h>=16)
++            /* P8: keyed by the indices plus the palette decode_indexed would use. */
++            hd=nfsu1_hd_find_p8(mem+va,w,h,mem+s_palette_va,
++                                (256u>>((s_palette_reg>>2)&3))*4,bytes_hash(va,w*h));
++        if (hd && t && t->hd==hd && t->levels==levels && t->pitch==pitch) {
++            /* Same replacement: the hash also covers bytes past the texture
++             * (P8: w*h*4) and only those changed - the image stands. */
++            t->hash=hash; t->used=t->checked=s_frame;
++            return t->view;
++        }
++        if (hd && (hd_pixels=nfsu1_hd_load(hd,&hdi))!=NULL && hdi.color && !s_have_bc) {
++            free(hd_pixels);            /* BC pack without BC sampling: keep the title's */
++            hd_pixels=NULL;
++        }
++        if (hd_pixels) {
++            hd_hit=hd;
 +            image_w=hd->width; image_h=hd->height;
-+            image_levels=s_mips ? full_levels(image_w,image_h) : 1;
-+            fmt=VK_FORMAT_B8G8R8A8_UNORM;
++            hd_bc=hdi.color;
++            if (hd_bc) {
++                /* NHD2: the pack's own mip chain; blits cannot write BC. */
++                image_levels=s_mips ? hdi.levels : 1;
++                fmt=hd_bc==0x0C ? VK_FORMAT_BC1_RGBA_UNORM_BLOCK
++                   : hd_bc==0x0E ? VK_FORMAT_BC2_UNORM_BLOCK : VK_FORMAT_BC3_UNORM_BLOCK;
++            } else {
++                image_levels=s_mips ? full_levels(image_w,image_h) : 1;
++                fmt=VK_FORMAT_B8G8R8A8_UNORM;
++            }
 +        }
 +    }
 +    if (!face && color==0x06) {
@@ -910,7 +1534,7 @@ index 773dd12..e6e7887 100644
          tex_free(t);
          t = NULL;
      }
-@@ -1266,13 +1298,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1266,13 +1381,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
              tex_free(t);
          t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch; t->fmt = fmt;
          t->face = face; t->levels = levels;
@@ -927,8 +1551,11 @@ index 773dd12..e6e7887 100644
              return face ? s_dummy_cube_view : s_dummy_view;
          }
          tex_index_add(t);
-@@ -1283,12 +1317,22 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1281,14 +1398,37 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+                  face ? " cube" : "");
+     }
      t->hash = hash;
++    t->hd = hd_hit;
      t->used = t->checked = s_frame;
  
 -    for (f = 0; f < layers; f++)
@@ -942,7 +1569,18 @@ index 773dd12..e6e7887 100644
 +        tex_upload(t,fmv_pixels,fmv.bytes,0,0,0);
 +    } else
 +#endif
-+    if (hd_pixels) {
++    if (hd_pixels && hd_bc) {
++        const uint8_t *p=hd_pixels;
++        uint32_t l, lw=image_w, lh=image_h;
++        for (l=0; l<image_levels; l++) {
++            uint32_t n=tex_bytes(hd_bc,lw,lh,0);
++            tex_upload(t,p,n,0,0,l);
++            p+=n;
++            lw=lw>1 ? lw/2 : 1;
++            lh=lh>1 ? lh/2 : 1;
++        }
++        free(hd_pixels);
++    } else if (hd_pixels) {
 +        tex_upload(t,hd_pixels,image_w*image_h*4,0,0,0);
 +        free(hd_pixels);
 +    } else {
@@ -951,12 +1589,22 @@ index 773dd12..e6e7887 100644
 +    }
 +    if (fmt == VK_FORMAT_B8G8R8A8_UNORM && image_levels > 1)
 +        gen_mips(t->image, image_w, image_h, image_levels, layers);
-+    size = fmt != VK_FORMAT_B8G8R8A8_UNORM ? tex_bytes(color, w, h, 0) : image_w * image_h * 4;
++    size = hd_bc ? tex_bytes(hd_bc, image_w, image_h, 0)
++         : fmt != VK_FORMAT_B8G8R8A8_UNORM ? tex_bytes(color, w, h, 0) : image_w * image_h * 4;
 +    if (image_levels > 1)
          size += size / 3;                   /* the mip chain */
      tex_account(t, size * layers);
      return t->view;
-@@ -1650,7 +1694,7 @@ static const char *cache_dir(void)
+@@ -1347,6 +1487,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
+             LOGE("cube 0x%08X %ux%u from surfaces (stored %u)\n", va, w, h, size);
+     }
+     c->used = s_frame;
++    for (f = 0; f < 6; f++)
++        if (faces[f]) cube_note_face(faces[f]->va);
+     for (f = 0; f < 6; f++) {
+         VkSurf *sf = faces[f];
+         VkImageBlit bl;
+@@ -1650,7 +1792,7 @@ static const char *cache_dir(void)
  #if defined(__SWITCH__)
      return "sdmc:/switch/nfsu1x/";
  #else
@@ -965,7 +1613,7 @@ index 773dd12..e6e7887 100644
  #endif
  }
  
-@@ -2433,30 +2477,29 @@ static int ready(void)
+@@ -2433,30 +2575,29 @@ static int ready(void)
  #else
      {
          const char *e = getenv("RECOMP_VK_HEADLESS");
@@ -1009,7 +1657,7 @@ index 773dd12..e6e7887 100644
      }
      {
          const char *v = getenv("RECOMP_VK_VALIDATION");
-@@ -2495,7 +2538,7 @@ static int ready(void)
+@@ -2495,7 +2636,7 @@ static int ready(void)
          if (pp.limits.maxFramebufferHeight < m) m = pp.limits.maxFramebufferHeight;
          s_max_size = m ? m : 4096;
          if (!(k > 0.0)) k = 1.0;                    /* unset, 0 or garbage */
@@ -1018,7 +1666,7 @@ index 773dd12..e6e7887 100644
          e = getenv("RECOMP_VK_SQUARE");
          s_square_env = xbox_video_widescreen() && !(e && *e == '0');
          e = getenv("RECOMP_GL_SCALE_X");
-@@ -2504,7 +2547,7 @@ static int ready(void)
+@@ -2504,11 +2645,16 @@ static int ready(void)
              s_square_env = 0;
          s_square = s_square_env && nv2a_vk_square;
          if (k > 0.0)
@@ -1027,7 +1675,24 @@ index 773dd12..e6e7887 100644
          s_scale_x = s_scale * s_xratio;
          if (s_scale != 1.0 || s_scale_x != 1.0 || s_square)
              fprintf(stderr, "  [VK] rendering at %g x %g (RECOMP_GL_SCALE[_X])%s, surfaces up to %u\n",
-@@ -2565,9 +2608,9 @@ static int ready(void)
+                     s_scale_x, s_scale, s_square ? ", square pixels" : "", s_max_size);
++        e = getenv("RECOMP_VK_SSAA");
++        k = e ? strtod(e, NULL) : 1.0;
++        s_ssaa = !(k > 1.0) ? 1.0 : k > 2.0 ? 2.0 : k;  /* 4 taps filter at most 2:1 */
++        fprintf(stderr, "  [VK] SSAA %gx (RECOMP_VK_SSAA)%s\n", s_ssaa,
++                s_ssaa > 1.0 ? ": surfaces at that times the scale, filtered down at present" : ", off");
+     }
+     if (s_ubo_align < 16) s_ubo_align = 16;
+     vkGetPhysicalDeviceMemoryProperties(s_pd, &s_memprops);
+@@ -2530,6 +2676,7 @@ static int ready(void)
+             s_aniso = 1.0f;
+         if (s_aniso > pp.limits.maxSamplerAnisotropy)
+             s_aniso = pp.limits.maxSamplerAnisotropy;
++        cube_up_init();                     /* boot line; else at the first cube */
+     }
+     {
+         VkFormatProperties fp;
+@@ -2565,9 +2712,9 @@ static int ready(void)
          }
      }
  #else
@@ -1039,7 +1704,7 @@ index 773dd12..e6e7887 100644
      }
  #endif
  
-@@ -2613,8 +2656,8 @@ static int ready(void)
+@@ -2613,8 +2760,8 @@ static int ready(void)
  #undef GET
  
      if (!s_headless && !create_swapchain()) {
@@ -1050,7 +1715,16 @@ index 773dd12..e6e7887 100644
      }
  
      {
-@@ -3787,6 +3830,17 @@ static void dump_surface(VkSurf *s, const char *path)
+@@ -3435,6 +3582,8 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
+ 
+     if (!ready())
+         return;
++    if (flare_fix_draw(&b, &r, s_frame))   /* FLARE_FIX */
++        return;                       /* FLARE_FIX */
+     s_regs = r;
+     s_batch = b;
+     if (s_inst_on < 0) {
+@@ -3787,6 +3936,17 @@ static void dump_surface(VkSurf *s, const char *path)
      vkCmdCopyImageToBuffer(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, buf, 1, &rg);
      flush_frame_wait();
      if (vkMapMemory(s_dev, mem, 0, bci.size, 0, &ptr) == VK_SUCCESS) {
@@ -1068,8 +1742,127 @@ index 773dd12..e6e7887 100644
          dump_bmp(path, (const uint8_t *)ptr, s->pw, s->ph);
          vkUnmapMemory(s_dev, mem);
      }
-@@ -4180,7 +4234,7 @@ static void vk_flip(void)
+@@ -3808,6 +3968,7 @@ static VkDescriptorSetLayout s_pp_dsl;
+ static VkPipelineLayout      s_pp_layout;
+ static VkSampler             s_pp_sampler;
+ static struct { VkFormat fmt; VkPipeline pipe; } s_pp[2];
++static int                   s_pp_failed;
+ 
+ static const char s_pp_vs[] =
+     "#version 450\n"
+@@ -3825,15 +3986,14 @@ static const char s_pp_fs[] =
+     "float Lat(vec2 uv) { return L(textureLod(src, uv, 0.0).rgb); }\n"
+     "#define LO(x, y) L(textureLodOffset(src, uv, 0.0, ivec2(x, y)).rgb)\n"
+     "const float Q[8] = float[](1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 4.0, 8.0);\n"
+-    "void main() {\n"
+-    "    vec2 uv = (gl_FragCoord.xy - pc.rect.xy) / pc.rect.zw;\n"
++    "vec3 fx(vec2 uv) {\n"
+     "    vec2 r = pc.rcp.xy;\n"
+     "    vec4 cM = textureLod(src, uv, 0.0);\n"
+     "    float lM = L(cM.rgb), lD = LO(0, 1), lU = LO(0, -1), lL = LO(-1, 0), lR = LO(1, 0);\n"
+     "    float mx = max(lM, max(max(lD, lU), max(lL, lR)));\n"
+     "    float mn = min(lM, min(min(lD, lU), min(lL, lR)));\n"
+     "    float range = mx - mn;\n"
+-    "    if (range < max(0.0312, mx * 0.125)) { o = vec4(cM.rgb, 1.0); return; }\n"
++    "    if (range < max(0.0312, mx * 0.125)) return cM.rgb;\n"
+     "    float lDL = LO(-1, 1), lUR = LO(1, -1), lUL = LO(-1, -1), lDR = LO(1, 1);\n"
+     "    float lDU = lD + lU, lLR = lL + lR;\n"
+     "    float lLc = lDL + lUL, lDc = lDL + lDR, lRc = lDR + lUR, lUc = lUR + lUL;\n"
+@@ -3872,7 +4032,18 @@ static const char s_pp_fs[] =
+     "    float s2 = (-2.0 * s1 + 3.0) * s1 * s1;\n"
+     "    fin = max(fin, s2 * s2 * pc.rcp.z);\n"
+     "    if (hor) uv.y += fin * step; else uv.x += fin * step;\n"
+-    "    o = vec4(textureLod(src, uv, 0.0).rgb, 1.0);\n"
++    "    return textureLod(src, uv, 0.0).rgb;\n"
++    "}\n"
++    /* rcp.w: 0 FXAA (as before SSAA); 1 SSAA, FXAA in the surface's texels at
++     * each tap; 2 SSAA, plain taps. Four bilinear taps at +-1/4 output pixel:
++     * an exact 2x2 box at 2:1, a tent over the footprint below that. */
++    "vec3 tap(vec2 uv) { return pc.rcp.w > 1.5 ? textureLod(src, uv, 0.0).rgb : fx(uv); }\n"
++    "void main() {\n"
++    "    vec2 uv = (gl_FragCoord.xy - pc.rect.xy) / pc.rect.zw;\n"
++    "    if (pc.rcp.w == 0.0) { o = vec4(fx(uv), 1.0); return; }\n"
++    "    vec2 h = 0.25 / pc.rect.zw;\n"
++    "    o = vec4(0.25 * (tap(uv - h) + tap(uv + h) + tap(uv + vec2(h.x, -h.y))\n"
++    "                     + tap(uv + vec2(-h.x, h.y))), 1.0);\n"
+     "}\n";
+ 
+ static int fxaa_on(void)
+@@ -3910,6 +4081,8 @@ static VkPipeline pp_pipe(VkFormat fmt)
+     for (i = 0; i < 2; i++)
+         if (s_pp[i].pipe && s_pp[i].fmt == fmt)
+             return s_pp[i].pipe;
++    if (s_pp_failed)                        /* SSAA calls in with FXAA off: build once */
++        return VK_NULL_HANDLE;
+     if (!s_pp_layout) {
+         VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                            VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+@@ -3976,6 +4149,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
+     if (!pipe) {
+         LOGE("FXAA pipeline failed; presenting with a blit\n");
+         s_fxaa = 0;
++        s_pp_failed = 1;
+         return VK_NULL_HANDLE;
+     }
+     i = s_pp[0].pipe ? 1 : 0;
+@@ -4001,8 +4175,15 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+     VkRect2D sc = { { dx, dy }, { (uint32_t)dw, (uint32_t)dh } };
+     VkDescriptorImageInfo ii;
+     VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+-    float pc[8];
+-
++    float pc[8], mode = 0.0f;
++
++    /* SSAA and the surface is taller than the output: filter it down, FXAA'd
++     * per tap below 2:1; at 2:1 and up a pixel has 4 samples and FXAA on top
++     * would only blur. Not larger (a low scale): FXAA or the blit as before. */
++    if (s_ssaa > 1.0 && s->ph > (uint32_t)dh)
++        mode = fxaa_on() && s->ph < 2u * (uint32_t)dh ? 1.0f : 2.0f;
++    else if (!fxaa_on())
++        return 0;
+     if (!pipe || !dview)
+         return 0;
+     end_rendering();
+@@ -4040,7 +4221,8 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+     p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_layout, 0, 1, &wr);
+     pc[0] = (float)dx; pc[1] = (float)dy; pc[2] = (float)dw; pc[3] = (float)dh;
+     pc[4] = 1.0f / (float)s->pw; pc[5] = 1.0f / (float)s->ph;
+-    pc[6] = s_fxaa_subpix; pc[7] = 0.0f;
++    pc[6] = s_fxaa_subpix;
++    pc[7] = mode;
+     vkCmdPushConstants(s_cb, s_pp_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
+     vkCmdDraw(s_cb, 3, 1, 0, 0);
+     p_end_rendering(s_cb);
+@@ -4059,12 +4241,13 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+ static void dump_fxaa(VkSurf *s, const char *path)
+ {
+     static VkSurf t;
+-    if (t.image && (t.pw != s->pw || t.ph != s->ph)) {
++    uint32_t pw = (uint32_t)(s->pw / s_ssaa + 0.5), ph = (uint32_t)(s->ph / s_ssaa + 0.5);
++    if (t.image && (t.pw != pw || t.ph != ph)) {
+         garbage_add(t.image, t.view, t.mem);
+         memset(&t, 0, sizeof t);
+     }
+     if (!t.image) {
+-        t.pw = s->pw; t.ph = s->ph;
++        t.pw = pw; t.ph = ph;
+         if (!make_image(t.pw, t.ph, VK_FORMAT_B8G8R8A8_UNORM,
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                         VK_IMAGE_ASPECT_COLOR_BIT, &t.image, &t.view, &t.mem)) {
+@@ -4086,6 +4269,8 @@ static void dump_fxaa(VkSurf *s, const char *path)
+  * elsewhere: the call is skipped. */
+ extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
+ 
++#include "flare_glare.h"   /* FLARE_FIX */
++
+ static void vk_flip(void)
+ {
+     static int dump_every = -1;
+@@ -4178,23 +4363,33 @@ static void vk_flip(void)
+     end_rendering();
+     s_rt = NULL;
      s_rt_depth = NULL;
++    flare_glare(s);   /* FLARE_FIX */
      {
          int pct = nv2a_vk_scale_pct;
 -        double k = pct < 50 ? 0.0 : pct > 400 ? 4.0 : pct / 100.0;
@@ -1077,7 +1870,9 @@ index 773dd12..e6e7887 100644
          int sq = s_square_env && nv2a_vk_square;
          if (!(k > 0.0))
              k = s_scale;
-@@ -4189,6 +4243,15 @@ static void vk_flip(void)
+-        if (k != s_scale || sq != s_square) {
++        if (k != s_scale || sq != s_square || cube_resize_due()) {
+             s_square = sq;
              rescale_surfaces(k);
          }
      }
@@ -1093,7 +1888,14 @@ index 773dd12..e6e7887 100644
      if (s && s_drew_any && dump_every && ((s_frame % (uint32_t)dump_every) == 0
                                            || (s_inst_alt && s_frame % (uint32_t)dump_every == 1))) {
          char path[320];
-@@ -4202,6 +4265,17 @@ static void vk_flip(void)
+         snprintf(path, sizeof path, "%s%05u.bmp", dump_prefix, s_frame);
+         dump_surface(s, path);
+-        if (s_headless && fxaa_on()) {
++        if (s_headless && (fxaa_on() || s_ssaa > 1.0)) {
+             snprintf(path, sizeof path, "%s%05u_fxaa.bmp", dump_prefix, s_frame);
+             barrier_all();
+             dump_fxaa(s, path);
+@@ -4202,6 +4397,17 @@ static void vk_flip(void)
      }
      barrier_all();
  
@@ -1111,15 +1913,338 @@ index 773dd12..e6e7887 100644
      VT("flip %u: surface %08X drew %d, acquiring\n", s_frame, s ? s->va : 0, s_drew_any);
      if (!s_headless) {
          VkResult rr = vkAcquireNextImageKHR(s_dev, s_swapchain, UINT64_MAX, s_f->acquired,
-@@ -4777,3 +4851,6 @@ void nv2a_vk_install(void)
+@@ -4228,7 +4434,7 @@ static void vk_flip(void)
+                 dw = (int)(lw * scale); dh = (int)(lh * scale);
+                 dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
+             }
+-            if (dw > 0 && dh > 0 && fxaa_on()
++            if (dw > 0 && dh > 0 && (fxaa_on() || s_ssaa > 1.0)
+                 && present_fxaa(s, dst, s_sc_views[idx], s_sc_format, s_sc_extent, dx, dy, dw, dh,
+                                 VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT))
+@@ -4777,3 +4983,6 @@ void nv2a_vk_install(void)
      nv2a_backend_register(&s_backend);
      fprintf(stderr, "[BOOT] NV2A Vulkan renderer registered\n");
  }
 +
 +/* PS5: fail at boot when VideoOut or required Vulkan features are unavailable. */
 +int nv2a_vk_prepare(void) { return ready(); }
+diff --git a/xboxrecomp/src/platform/fast_time.h b/xboxrecomp/src/platform/fast_time.h
+new file mode 100644
+index 0000000..541b9ec
+--- /dev/null
++++ b/xboxrecomp/src/platform/fast_time.h
+@@ -0,0 +1,308 @@
++/*
++ * fast_time.h - RECOMP_FAST_TIME=1: the host clocks from the TSC (default off).
++ *
++ * Why: on the PS5 clock_gettime is a system call, 20.3 us against 11.8 ns for
++ * a TSC read (PS5_Vulkan docs/HARDWARE_FINDINGS.md, 2026-09-23, R34 cost
++ * probe), and a race reads the clock ~110 times a frame through the guest
++ * rdtsc emulation alone (QueryPerformanceCounter <- xbox_ReadTimeStampCounter),
++ * plus GetTickCount64 on every kernel call. In a PS5 sampling profile ~80% of
++ * the samples in race hitch frames were inside clock_gettime.
++ *
++ * One clock: ns = anchor_ns + (rdtsc - anchor_tsc) * scale. The anchor is a
++ * CLOCK_MONOTONIC reading paired with the TSC midpoint of that call; whichever
++ * thread finds it older than FT_ANCHOR_NS refreshes it (a try-lock -- the
++ * others keep extrapolating, nobody waits on the system call). Two anchor slots,
++ * each under its own sequence number, so a reader never waits for a writer.
++ * scale is re-measured from anchors >= 100 ms apart and smoothed (it tracks
++ * CLOCK_MONOTONIC being slewed: under WSL it runs at 4.33 or 4.69 GHz of TSC,
++ * switching every few seconds, and the error peaks at each switch). The value
++ * handed out is the atomic max of everything handed out, so a re-anchor that
++ * lands behind the extrapolation holds the clock still instead of stepping it
++ * back. QueryPerformanceCounter, GetTickCount(64) and GetSystemTimeAsFileTime
++ * (wall offset read once at init + this clock) all read it, so every guest
++ * time source -- rdtsc emulation, KeQueryPerformanceCounter, KeQuerySystemTime,
++ * KeQueryInterruptTime, KeTickCount, KeSystemTime/KeInterruptTime -- runs on
++ * the same clock in the same units as before.
++ *
++ * Self-check: each accepted anchor compares the extrapolated value with the
++ * fresh clock_gettime at the same TSC; every 10 s the re-anchoring thread
++ * prints "[time] fast on: ..." (counters per 10 s window). "max |fast-real|"
++ * takes anchors within 1.25 * FT_ANCHOR_NS of the previous one: readers are
++ * served at most FT_ANCHOR_NS of extrapolation (the first read past it
++ * re-anchors and gets the fresh value; one that loses the re-anchor try-lock
++ * gets at most 2 * FT_ANCHOR_NS), so this is the error they could see.
++ * After a longer gap nobody read the far end of the line; that error is
++ * "gaps" (it grows with the gap when the rate is off).
++ *
++ * Discontinuities (rest mode: the TSC reset, or the TSC and CLOCK_MONOTONIC
++ * advanced by different amounts while asleep): a TSC more than FT_BACK_NS
++ * behind the anchor makes the anchor stale, and a re-anchor that finds the TSC
++ * behind the anchor or |fast-real| > FT_JUMP_NS restarts from clock_gettime --
++ * fresh anchor, fresh scale baseline, scale kept -- and counts a
++ * "discontinuity". No reader is handed more than 2 * FT_ANCHOR_NS past the
++ * anchor's real time, so the max above never runs ahead and holds the clock.
++ *
++ * The state is static: included by platform/win32_compat.c only (one copy for
++ * the runtime); ps5/tests/fast_time_test.c includes it for a copy of its own.
++ */
++#ifndef FAST_TIME_H
++#define FAST_TIME_H
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <time.h>
++
++#if defined(__x86_64__) || defined(__i386__)
++#  define FT_HAVE_TSC 1
++#else
++#  define FT_HAVE_TSC 0
++#endif
++
++#define FT_ANCHOR_NS    2000000ull    /* re-anchor once the anchor is 2 ms old */
++#define FT_WINDOW_NS     100000ull    /* clock_gettime that took longer pins nothing */
++#define FT_BASE_NS    100000000ull    /* scale baseline: re-measured every 100 ms */
++#define FT_REPORT_NS 10000000000ull   /* [time] line cadence */
++#define FT_BACK_NS      1000000ull    /* TSC this far behind the anchor: reset, not core skew */
++#define FT_JUMP_NS     50000000ull    /* |fast-real| past this at a re-anchor: a discontinuity */
++
++typedef struct {
++    uint32_t seq;                     /* odd while being written */
++    uint64_t tsc, ns;                 /* the pair */
++    uint64_t scale;                   /* ns per tick, 32.32 fixed point */
++} FtAnchor;
++
++static int      ft_on = -1;           /* -1 until ft_init */
++static FtAnchor ft_a[2];
++static uint32_t ft_cur;               /* published slot */
++static uint32_t ft_busy;              /* re-anchor try-lock */
++static uint64_t ft_last;              /* largest value handed out */
++static int64_t  ft_wall_off;          /* CLOCK_REALTIME - CLOCK_MONOTONIC at init, ns */
++/* Writer-only (under ft_busy) */
++static uint64_t ft_base_tsc, ft_base_ns, ft_report_ns;
++static int      ft_scale_measured;
++/* Per-window counters */
++static uint64_t ft_n_anchor, ft_n_skip, ft_n_clamp, ft_max_err, ft_max_err_gap, ft_n_disc;
++
++static inline uint64_t ft_rdtsc(void)
++{
++#if defined(FT_TEST_TSC)
++    return FT_TEST_TSC();             /* ps5/tests/fast_time_test.c: a TSC that jumps */
++#elif FT_HAVE_TSC
++    return __builtin_ia32_rdtsc();
++#else
++    return 0;
++#endif
++}
++
++static inline uint64_t ft_mono_ns(clockid_t id)
++{
++    struct timespec ts;
++    clock_gettime(id, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++}
++
++static inline uint64_t ft_scaled(uint64_t ticks, uint64_t scale)
++{
++    return (uint64_t)(((unsigned __int128)ticks * scale) >> 32);
++}
++
++static inline int ft_active(void)
++{
++    return __atomic_load_n(&ft_on, __ATOMIC_ACQUIRE) == 1;
++}
++
++static inline void ft_publish(uint64_t tsc, uint64_t ns, uint64_t scale)
++{
++    FtAnchor *a = &ft_a[(__atomic_load_n(&ft_cur, __ATOMIC_RELAXED) + 1) & 1];
++    uint32_t s = __atomic_load_n(&a->seq, __ATOMIC_RELAXED);
++    __atomic_store_n(&a->seq, s + 1, __ATOMIC_RELAXED);
++    __atomic_thread_fence(__ATOMIC_RELEASE);
++    __atomic_store_n(&a->tsc, tsc, __ATOMIC_RELAXED);
++    __atomic_store_n(&a->ns, ns, __ATOMIC_RELAXED);
++    __atomic_store_n(&a->scale, scale, __ATOMIC_RELAXED);
++    __atomic_store_n(&a->seq, s + 2, __ATOMIC_RELEASE);
++    __atomic_store_n(&ft_cur, (uint32_t)(a - ft_a), __ATOMIC_RELEASE);
++}
++
++static inline void ft_load(uint64_t *tsc, uint64_t *ns, uint64_t *scale)
++{
++    for (;;) {
++        const FtAnchor *a = &ft_a[__atomic_load_n(&ft_cur, __ATOMIC_ACQUIRE) & 1];
++        uint32_t s = __atomic_load_n(&a->seq, __ATOMIC_ACQUIRE);
++        *tsc = __atomic_load_n(&a->tsc, __ATOMIC_RELAXED);
++        *ns = __atomic_load_n(&a->ns, __ATOMIC_RELAXED);
++        *scale = __atomic_load_n(&a->scale, __ATOMIC_RELAXED);
++        __atomic_thread_fence(__ATOMIC_ACQUIRE);
++        /* A slot is rewritten two anchors (>= 4 ms) later: retried only by a
++         * reader pre-empted that long between the loads. */
++        if (!(s & 1) && __atomic_load_n(&a->seq, __ATOMIC_RELAXED) == s)
++            return;
++    }
++}
++
++static inline void ft_report(FILE *out, uint64_t scale)
++{
++    fprintf(out, "[time] fast on: anchors %llu, max |fast-real| %.1f us, backsteps clamped %llu, "
++                 "scale %.6f GHz, skipped %llu, gaps %.1f us, discontinuities %llu (per 10 s)\n",
++            (unsigned long long)__atomic_load_n(&ft_n_anchor, __ATOMIC_RELAXED),
++            __atomic_load_n(&ft_max_err, __ATOMIC_RELAXED) / 1000.0,
++            (unsigned long long)__atomic_load_n(&ft_n_clamp, __ATOMIC_RELAXED),
++            4294967296.0 / (double)scale,
++            (unsigned long long)__atomic_load_n(&ft_n_skip, __ATOMIC_RELAXED),
++            __atomic_load_n(&ft_max_err_gap, __ATOMIC_RELAXED) / 1000.0,
++            (unsigned long long)__atomic_load_n(&ft_n_disc, __ATOMIC_RELAXED));
++    fflush(out);
++}
++
++/* One CLOCK_MONOTONIC reading and the TSC midpoint of the call that took it
++ * (it sampled the clock somewhere in between): the tightest of up to three
++ * tries, fewer once one is within `enough` ticks. Returns the window, ticks. */
++static inline uint64_t ft_pair(uint64_t *tsc, uint64_t *ns, uint64_t enough)
++{
++    uint64_t best = UINT64_MAX;
++    int i;
++    for (i = 0; i < 3 && best > enough; i++) {
++        uint64_t t0 = ft_rdtsc(), n = ft_mono_ns(CLOCK_MONOTONIC), t1 = ft_rdtsc();
++        if (t1 - t0 < best) {
++            best = t1 - t0;
++            *tsc = t0 + best / 2;
++            *ns = n;
++        }
++    }
++    return best;
++}
++
++/* Caller holds ft_busy. cur_*: the published anchor. */
++static __attribute__((noinline)) void ft_reanchor(uint64_t cur_tsc, uint64_t cur_ns, uint64_t scale)
++{
++    uint64_t tsc, ns, pred, err, win = ft_pair(&tsc, &ns, scale ? (FT_WINDOW_NS << 32) / scale : 0);
++
++    pred = cur_ns + ft_scaled(tsc > cur_tsc ? tsc - cur_tsc : 0, scale);
++    err = pred > ns ? pred - ns : ns - pred;
++    if (tsc < cur_tsc || err > FT_JUMP_NS + ft_scaled(win, scale)) {
++        /* The TSC was reset or jumped against CLOCK_MONOTONIC: the line is
++         * void and so is the scale baseline across the jump. Restart both
++         * from the real time; keep scale (the rate itself did not change). */
++        __atomic_add_fetch(&ft_n_disc, 1, __ATOMIC_RELAXED);
++        ft_base_tsc = tsc;
++        ft_base_ns = ns;
++    } else if (ft_scaled(win, scale) > FT_WINDOW_NS) {
++        /* Too coarse to correct anything: move the anchor along the current
++         * line (the clock itself does not change) and try again next time. */
++        __atomic_add_fetch(&ft_n_skip, 1, __ATOMIC_RELAXED);
++        ft_publish(tsc, pred, scale);
++        return;
++    } else {
++        uint64_t *m = pred - cur_ns <= FT_ANCHOR_NS + FT_ANCHOR_NS / 4 ? &ft_max_err : &ft_max_err_gap;
++        if (err > __atomic_load_n(m, __ATOMIC_RELAXED))
++            __atomic_store_n(m, err, __ATOMIC_RELAXED);
++        __atomic_add_fetch(&ft_n_anchor, 1, __ATOMIC_RELAXED);
++
++        if (ns - ft_base_ns >= FT_BASE_NS && tsc > ft_base_tsc) {
++            uint64_t m = (uint64_t)(((unsigned __int128)(ns - ft_base_ns) << 32) / (tsc - ft_base_tsc));
++            /* The first baseline replaces the 2 ms boot estimate; later ones are
++             * smoothed (each end is +-FT_WINDOW_NS/2: <= 0.1% of 100 ms). */
++            scale = ft_scale_measured ? (uint64_t)((int64_t)scale + ((int64_t)m - (int64_t)scale) / 4) : m;
++            ft_scale_measured = 1;
++            ft_base_tsc = tsc;
++            ft_base_ns = ns;
++        }
++    }
++    ft_publish(tsc, ns, scale);
++
++    if (ns - ft_report_ns >= FT_REPORT_NS) {
++        ft_report_ns = ns;
++        ft_report(stderr, scale);
++        __atomic_store_n(&ft_n_anchor, 0, __ATOMIC_RELAXED);
++        __atomic_store_n(&ft_n_skip, 0, __ATOMIC_RELAXED);
++        __atomic_store_n(&ft_n_clamp, 0, __ATOMIC_RELAXED);
++        __atomic_store_n(&ft_max_err, 0, __ATOMIC_RELAXED);
++        __atomic_store_n(&ft_max_err_gap, 0, __ATOMIC_RELAXED);
++        __atomic_store_n(&ft_n_disc, 0, __ATOMIC_RELAXED);
++    }
++}
++
++/* Re-anchor due: the anchor is FT_ANCHOR_NS old, or the TSC is far behind it. */
++static inline int ft_due(uint64_t t, uint64_t a_tsc, uint64_t scale)
++{
++    return t >= a_tsc ? ft_scaled(t - a_tsc, scale) >= FT_ANCHOR_NS : ft_scaled(a_tsc - t, scale) > FT_BACK_NS;
++}
++
++/* Monotonic nanoseconds (CLOCK_MONOTONIC's epoch). Only when ft_active(). */
++static inline uint64_t ft_now_ns(void)
++{
++    uint64_t a_tsc, a_ns, scale, t, ns, last;
++
++    for (;;) {
++        ft_load(&a_tsc, &a_ns, &scale);
++        t = ft_rdtsc();
++        /* rdtsc is not ordered after the loads, and may come from a core a
++         * few ticks behind the anchor's: never extrapolate backwards. Far
++         * behind (FT_BACK_NS), the TSC was reset: re-anchor. */
++        ns = a_ns + ft_scaled(t > a_tsc ? t - a_tsc : 0, scale);
++        if (ns - a_ns < FT_ANCHOR_NS && (t >= a_tsc || ft_scaled(a_tsc - t, scale) <= FT_BACK_NS))
++            break;
++        {
++            uint32_t idle = 0;
++            if (!__atomic_compare_exchange_n(&ft_busy, &idle, 1, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
++                /* Someone else re-anchors: extrapolate, but not past 2 anchor
++                 * periods -- beyond that the TSC jumped and the line is void. */
++                if (ns - a_ns > 2 * FT_ANCHOR_NS)
++                    ns = a_ns + 2 * FT_ANCHOR_NS;
++                break;
++            }
++            ft_load(&a_tsc, &a_ns, &scale);   /* it may have just finished */
++            if (ft_due(ft_rdtsc(), a_tsc, scale))
++                ft_reanchor(a_tsc, a_ns, scale);
++            __atomic_store_n(&ft_busy, 0, __ATOMIC_RELEASE);
++        }
++    }
++
++    last = __atomic_load_n(&ft_last, __ATOMIC_RELAXED);
++    while (ns > last)
++        if (__atomic_compare_exchange_n(&ft_last, &last, ns, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++            return ns;
++    if (ns < last)
++        __atomic_add_fetch(&ft_n_clamp, 1, __ATOMIC_RELAXED);
++    return last;
++}
++
++/* Wall clock in ns since 1970 on the same clock (offset read once). */
++static inline uint64_t ft_wall_ns(void)
++{
++    return ft_now_ns() + (uint64_t)ft_wall_off;
++}
++
++/* Reads RECOMP_FAST_TIME once, calibrates, prints "[time] fast on|off".
++ * Until it has run, ft_active() is false and callers keep clock_gettime:
++ * call it after the environment is final (kernel_bridge.c gil_enabled). */
++static inline void ft_init(void)
++{
++    const char *e = getenv("RECOMP_FAST_TIME");
++    int on = e && *e == '1' && FT_HAVE_TSC, unset = -1;
++
++    /* Once: ft_on -1 -> 2 (calibrating, still inactive). A racing or later
++     * caller returns and keeps clock_gettime until ft_on is published. */
++    if (!__atomic_compare_exchange_n(&ft_on, &unset, 2, 0, __ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
++        return;
++    if (on) {
++        /* Boot estimate of the rate over >= 2 ms, as perf_init does. */
++        uint64_t t0, n0, n1, t1, r, m;
++        ft_pair(&t0, &n0, 0);
++        while (ft_mono_ns(CLOCK_MONOTONIC) - n0 < 2000000ull) { }
++        ft_pair(&t1, &n1, 0);
++        r = ft_mono_ns(CLOCK_REALTIME);
++        m = ft_mono_ns(CLOCK_MONOTONIC);
++        ft_wall_off = (int64_t)(r - m);
++        ft_base_tsc = t1;
++        ft_base_ns = n1;
++        ft_report_ns = n1;
++        __atomic_store_n(&ft_last, n1, __ATOMIC_RELAXED);
++        ft_publish(t1, n1, (uint64_t)((((unsigned __int128)(n1 - n0)) << 32) / (t1 - t0 ? t1 - t0 : 1)));
++    }
++    fprintf(stderr, "[time] fast %s\n", on ? "on" : "off");
++    __atomic_store_n(&ft_on, on, __ATOMIC_RELEASE);
++}
++
++#endif /* FAST_TIME_H */
 diff --git a/xboxrecomp/src/platform/win32_compat.c b/xboxrecomp/src/platform/win32_compat.c
-index 63108db..ffd7d1f 100644
+index 63108db..1e1bfcc 100644
 --- a/xboxrecomp/src/platform/win32_compat.c
 +++ b/xboxrecomp/src/platform/win32_compat.c
 @@ -46,7 +46,9 @@
@@ -1321,8 +2446,7 @@ index 63108db..ffd7d1f 100644
 -
 -/* Map `len` bytes of shared-memory object `shm` at `addr`. */
 -static int nx_map_shm(Handle shm, uintptr_t addr, size_t len)
-+HANDLE w32_direct_mapping_handle(void *payload, void (*release)(void *))
- {
+-{
 -    Result rc = svcMapSharedMemory(shm, (void *)addr, len, Perm_Rw);
 -    if (R_FAILED(rc)) {
 -        fprintf(stderr, "  [NX] map shared memory at %p (+%zu KB) failed: 0x%X\n",
@@ -1429,7 +2553,8 @@ index 63108db..ffd7d1f 100644
 -}
 -
 -BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldProtect)
--{
++HANDLE w32_direct_mapping_handle(void *payload, void (*release)(void *))
+ {
 -    (void)address; (void)size; (void)newProtect;
 -    if (oldProtect) *oldProtect = PAGE_READWRITE;
 -    return TRUE;
@@ -1579,7 +2704,56 @@ index 63108db..ffd7d1f 100644
  
  /* ===================================================================== */
  /* Time                                                                  */
-@@ -2104,7 +1719,7 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
+@@ -1992,13 +1607,24 @@ BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldPro
+ /* 100-ns intervals between 1601-01-01 and 1970-01-01 */
+ #define FILETIME_EPOCH_DIFF 116444736000000000ULL
+ 
++/* RECOMP_FAST_TIME=1: QueryPerformanceCounter, GetTickCount(64) and
++ * GetSystemTimeAsFileTime from one TSC-based clock (fast_time.h). Off: the
++ * clock_gettime code below, unchanged. */
++#include "fast_time.h"
++void recomp_fast_time_init(void) { ft_init(); }
++
+ VOID GetSystemTimeAsFileTime(LPFILETIME ft)
+ {
+     struct timespec ts;
+-    clock_gettime(CLOCK_REALTIME, &ts);
+-    ULONGLONG t = FILETIME_EPOCH_DIFF
+-                + (ULONGLONG)ts.tv_sec * 10000000ULL
+-                + (ULONGLONG)ts.tv_nsec / 100ULL;
++    ULONGLONG t;
++    if (ft_active()) {
++        t = FILETIME_EPOCH_DIFF + ft_wall_ns() / 100ULL;
++    } else {
++        clock_gettime(CLOCK_REALTIME, &ts);
++        t = FILETIME_EPOCH_DIFF
++          + (ULONGLONG)ts.tv_sec * 10000000ULL
++          + (ULONGLONG)ts.tv_nsec / 100ULL;
++    }
+     ft->dwLowDateTime  = (DWORD)(t & 0xFFFFFFFFULL);
+     ft->dwHighDateTime = (DWORD)(t >> 32);
+ }
+@@ -2034,6 +1660,8 @@ VOID GetLocalTime(LPSYSTEMTIME st)
+ ULONGLONG GetTickCount64(void)
+ {
+     struct timespec ts;
++    if (ft_active())
++        return ft_now_ns() / 1000000ULL;
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     return (ULONGLONG)ts.tv_sec * 1000ULL + (ULONGLONG)ts.tv_nsec / 1000000ULL;
+ }
+@@ -2043,6 +1671,10 @@ DWORD GetTickCount(void) { return (DWORD)GetTickCount64(); }
+ BOOL QueryPerformanceCounter(PLARGE_INTEGER count)
+ {
+     struct timespec ts;
++    if (ft_active()) {
++        count->QuadPart = (LONGLONG)ft_now_ns();
++        return TRUE;
++    }
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     count->QuadPart = (LONGLONG)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+     return TRUE;
+@@ -2104,7 +1736,7 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
  #if defined(__APPLE__)
      memset_s(ptr, cnt, 0, cnt);
  #else
@@ -1588,7 +2762,7 @@ index 63108db..ffd7d1f 100644
  #endif
  }
  
-@@ -2383,237 +1998,7 @@ size_t view_take(const void *addr)
+@@ -2383,237 +2015,7 @@ size_t view_take(const void *addr)
      return len;
  }
  
@@ -1602,7 +2776,7 @@ index 63108db..ffd7d1f 100644
 -    Handle shm;
 -    Result rc;
 -    w32_object *o;
--
+ 
 -    (void)file; (void)sa; (void)protect; (void)name;
 -    if (!size) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
 -    pthread_mutex_lock(&s_nx_lock);
@@ -1768,7 +2942,7 @@ index 63108db..ffd7d1f 100644
 -{
 -    w32_object *o = obj_from(mapping);
 -    if (!o || o->kind != K_FILEMAP) { SetLastError(ERROR_INVALID_HANDLE); return NULL; }
- 
+-
 -    off_t  off = ((off_t)offHigh << 32) | offLow;
 -    SIZE_T len = count ? count : (o->map_size - (SIZE_T)off);
 -    int prot   = PROT_READ | ((access != FILE_MAP_READ) ? PROT_WRITE : 0);
@@ -1826,7 +3000,7 @@ index 63108db..ffd7d1f 100644
  
  /* ===================================================================== */
  /* VirtualQuery                                                           */
-@@ -2638,36 +2023,7 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
+@@ -2638,36 +2040,7 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
   * honest answer: a host heap pointer is not a Win32 reservation, and the
   * callers that branch on this want to know which allocator owns the pointer.
   */
@@ -1863,7 +3037,7 @@ index 63108db..ffd7d1f 100644
  
  BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
  {
-@@ -2710,7 +2066,12 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -2710,7 +2083,12 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
      b->ullAvailPhys     = avail;
      b->ullTotalPageFile = b->ullTotalPhys + (ULONGLONG)swap.xsu_total;
      b->ullAvailPageFile = b->ullAvailPhys + (ULONGLONG)swap.xsu_avail;
@@ -1878,10 +3052,18 @@ index 63108db..ffd7d1f 100644
      if (sysinfo(&si) != 0) return FALSE;
  
 diff --git a/xboxrecomp/src/platform/win32_compat.h b/xboxrecomp/src/platform/win32_compat.h
-index 0b4b491..4b06005 100644
+index 0b4b491..57e2d5d 100644
 --- a/xboxrecomp/src/platform/win32_compat.h
 +++ b/xboxrecomp/src/platform/win32_compat.h
-@@ -574,3 +574,6 @@ static inline MMRESULT waveOutClose(HWAVEOUT h) { (void)h; return MMSYSERR_NOERR
+@@ -219,6 +219,7 @@ DWORD GetTickCount(void);
+ ULONGLONG GetTickCount64(void);
+ BOOL  QueryPerformanceCounter(PLARGE_INTEGER count);
+ BOOL  QueryPerformanceFrequency(PLARGE_INTEGER freq);
++void  recomp_fast_time_init(void);   /* RECOMP_FAST_TIME, fast_time.h; once, env final */
+ 
+ /* ---- Misc ------------------------------------------------------------- */
+ VOID  OutputDebugStringA(LPCSTR str);
+@@ -574,3 +575,6 @@ static inline MMRESULT waveOutClose(HWAVEOUT h) { (void)h; return MMSYSERR_NOERR
  
  #endif /* !_WIN32 */
  #endif /* WIN32_COMPAT_H */

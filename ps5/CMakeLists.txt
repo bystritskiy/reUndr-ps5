@@ -32,7 +32,8 @@ add_library(nfsu1_host STATIC src/memory_ps5.c src/input_ps5.c src/pad_map.c src
 add_library(nfsu1_start OBJECT src/native_start.c src/main_ps5.c "${ROOT}/build/vulkan_shim.c")
 foreach(t nfsu1_runtime nfsu1_game nfsu1_host nfsu1_start)
  target_compile_definitions(${t} PRIVATE NFSU1_PS5=1 NFSU1_PS5_DIRECT_MEMORY=1 NFSU2_VULKAN=1)
- target_compile_options(${t} PRIVATE -O2 -fwrapv -fsigned-char -ffp-contract=off -fno-strict-aliasing -ffunction-sections -fdata-sections -Wno-format -Wno-pointer-sign -Wno-parentheses-equality -Wno-unused-value)
+ # Native TLS: guest registers are __thread; -femulated-tls made each access a libkernel call.
+ target_compile_options(${t} PRIVATE -fno-emulated-tls -ftls-model=local-exec -O2 -fwrapv -fsigned-char -ffp-contract=off -fno-strict-aliasing -ffunction-sections -fdata-sections -Wno-format -Wno-pointer-sign -Wno-parentheses-equality -Wno-unused-value)
  target_include_directories(${t} PRIVATE compat src "${ROOT}/upstream/src" "${GEN}"
  "${ROOT}/upstream/xboxrecomp/include" "${RT}" "${RT}/platform" "${RT}/kernel" "${RT}/apu"
  "${RT}/nv2a" "${RT}/nv2a_vk" "${RT}/nv2a_gl" "${RT}/input" "${RT}/video" "${RT}/audio" "${RT}/d3d" "${RT}/usb"

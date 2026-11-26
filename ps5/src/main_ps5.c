@@ -18,6 +18,10 @@
 #include <dirent.h>
 #include <strings.h>
 extern int nfsu1_game_main(int,char **);
+extern int g_crash_log_fd; /* upstream/src/main.c crash_signal writes here past the pipe */
+/* Native TLS check: the value is .tdata's init image (0x37f), placed by the loader at the offset lld assumed. */
+extern __thread uint16_t g_fp_control_word;
+static void *tls_probe(void *out) { *(unsigned *)out=g_fp_control_word;return NULL; }
 extern int sceSystemServiceHideSplashScreen(void);
 extern int sceKernelDebugOutText(int,const char *);
 extern int scePthreadSetaffinity(unsigned long,unsigned long);
@@ -132,9 +136,10 @@ static void *log_writer(void *arg) {
  }
  close(s->from);close(s->to);return NULL;
 }
-static FILE *open_log(const char *path) {
+static FILE *open_log(const char *path,int *fd_out) {
  static struct log_sink sinks[2];static unsigned used;
  int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC,0666),ends[2];if(fd<0)return NULL;
+ if(fd_out)*fd_out=fd;
  if(used<2&&pipe(ends)==0) {
    FILE *stream=fdopen(ends[1],"w");pthread_t th;
    struct log_sink *sink=&sinks[used];*sink=(struct log_sink){ends[0],fd};
@@ -158,7 +163,7 @@ int main(int argc,char **argv) {
  mkdir("/data/nfsu1",0777);mkdir("/data/nfsu1/PPSA99025",0777);
  mkdir("/data/nfsu1/PPSA99025/save",0777);
  chmod("/data/nfsu1",0777);chmod("/data/nfsu1/PPSA99025",0777);
- FILE *out=open_log("/data/nfsu1/PPSA99025/stdout.log"),*err=open_log("/data/nfsu1/PPSA99025/stderr.log");
+ FILE *out=open_log("/data/nfsu1/PPSA99025/stdout.log",NULL),*err=open_log("/data/nfsu1/PPSA99025/stderr.log",&g_crash_log_fd);
  if(!out||!err)return 1;stdout=out;stderr=err;load_settings();
  sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.001.000\n");
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"offscreen");
@@ -167,6 +172,10 @@ int main(int argc,char **argv) {
  /* Lossless HD UI shares the existing LRU with world textures. */
  setenv("RECOMP_GL_TEX_MB","512",0);
  setenv("RECOMP_QUIET","1",0);setenv("NFSU2_FPS_CAP","60",0);
+ /* Guest clocks from the TSC: clock_gettime is a ~20 us system call on the PS5 (PS5_Vulkan docs/HARDWARE_FINDINGS.md:3261-3266). Measured on a PS5 (Inner City race): guest main thread 6.75->5.65 ms/frame, race hitches 2->0. RECOMP_FAST_TIME=0 in nfsu1_env.txt restores clock_gettime. */
+ setenv("RECOMP_FAST_TIME","1",0);
+ { unsigned other=0;pthread_t t;if(!pthread_create(&t,NULL,tls_probe,&other))pthread_join(t,NULL);
+   fprintf(stderr,"[TLS] native: main fp_cw=0x%x thread fp_cw=0x%x (want 0x37f)\n",g_fp_control_word,other);fflush(stderr); }
  char dir[1024]="/app0/game";
  if(!valid(dir))snprintf(dir,sizeof dir,"/data/nfsu1/game");
  if(!valid(dir)) {

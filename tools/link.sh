@@ -30,6 +30,18 @@ for pair in 'libSceAgc agc_canary_link_stub.c' 'libSceAgcDriver agc_driver_canar
 done
 source "$vulkan/tools/radv-link.sh"
 radv_link_recipe "$vulkan" "$sdk" "$archive"
+# Guest registers are native TLS (ps5/CMakeLists.txt): the pinned layout has no
+# PT_TLS, so lld cannot resolve TPOFF. Add one; .tdata/.tbss move ahead of .data
+# so the converter's data PT_LOAD (filesz ends at .data) still carries .tdata,
+# and ALIGN(32) matches the converter's minimum PT_TLS alignment (0x20), which
+# the loader uses for the main module's static TLS offset.
+sed -e 's/^\( *\)dynamic PT_DYNAMIC FLAGS (0x6);/&\n\1tls PT_TLS;/' \
+    -e '/^ *\.tdata : /d' -e '/^ *\.tbss : /d' \
+    -e 's/^\( *\)\.data : { \*(\.data \.data\.\*) } : data/\1.tdata : ALIGN(32) { *(.tdata .tdata.*) } : data : tls\n\1.tbss : ALIGN(32) { *(.tbss .tbss.*) } : data : tls\n&/' \
+    "$vulkan/tooling/native/ps5-pie.ld" > "$work/ps5-pie.ld"
+grep -q 'tls PT_TLS' "$work/ps5-pie.ld" && [[ $(grep -c ': data : tls' "$work/ps5-pie.ld") == 2 ]]
+cp "$vulkan/tooling/psbc/ps5-pie-unwind.ld" "$work/"
+radv_linker_script=(-T "$work/ps5-pie-unwind.ld" -L "$work")
 # The recipe groups its C++ archives; flatten that group into our app group.
 inputs=()
 for item in "${radv_link_inputs[@]}"; do
@@ -76,3 +88,7 @@ done
     --as-needed "${stubs[@]}"
 llvm-readelf-18 --dyn-syms --wide "$work/llvm-pie.elf" > "$work/imports.txt"
 llvm-readelf-18 --program-headers --wide "$work/llvm-pie.elf" > "$work/segments.txt"
+# The native TLS offset is verified only for PT_TLS align 0x20 (see the sed
+# above); a TLS variable with _Alignas(>32) would raise it. Fail, not ship.
+tls_align=$(awk '$1 == "TLS" { print $NF }' "$work/segments.txt")
+[[ $tls_align == 0x20 ]] || { echo "link.sh: PT_TLS align '$tls_align', expected 0x20" >&2; exit 1; }

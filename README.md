@@ -160,6 +160,8 @@ plays a tone from one speaker at a time. Settings saved in the game override the
 | `RECOMP_FPS_LOG` | 0 | fps in the log every 10 seconds |
 | `NFSU1_HD` | 1 | 0 turns the HD textures off, and the PlayStation prompts with them |
 
+Performance and picture options, all optional, are listed in [docs/PARAMETERS.md](docs/PARAMETERS.md).
+
 ## Your files
 
 Everything reUndr writes is in `/data/nfsu1/PPSA99025/`: saves, settings, shader caches and logs.
