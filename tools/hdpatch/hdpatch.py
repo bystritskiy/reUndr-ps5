@@ -8,6 +8,11 @@ without the disc the patch is noise; with it, `apply` rebuilds the pack byte for
 (every file is checked against its SHA-256). Files that already ship in the release package
 (PPSA99025/hd) are not in the patch: `apply` copies them from --base.
 
+On the console nothing needs to run: copy the patch folder beside the hd folder of the installed game
+(/data/reUndr/hdpatch, or reUndr/hdpatch on the USB drive that holds reUndr/game).
+The game opens each file the first time it shows that texture (hd_textures.c, from index.bin)
+and writes it into reUndr/hd; an hd folder that came from anything else is kept as hd.bak-<time>.
+
   make:  python3 tools/hdpatch/hdpatch.py make  --game <disc> --pack <hd> --base <PPSA99025/hd> --out <patch>
   apply: python3 tools/hdpatch/hdpatch.py apply --game <disc> --patch <patch> --base <PPSA99025/hd> --out <hd>
 
@@ -81,9 +86,29 @@ def find_sources(game, recs, only=None):
     return found
 
 
+def key(source):
+    return hashlib.sha256(DOMAIN + source).digest()
+
+
 def stream(source, name, n):
-    key = hashlib.sha256(DOMAIN + source).digest()
-    return hashlib.shake_256(key + name.encode()).digest(n)
+    return hashlib.shake_256(key(source) + name.encode()).digest(n)
+
+
+def index_bin(recs, files, sources):
+    """index.bin for the runtime, one 72-byte row per manifest record: wrap[32], sha256[32], size, from.
+    from 1: the file opens with this record's original (wrap = its key ^ the key the file was made with,
+    for a file several records share), 2: copy it from the release's /app0/hd, 0: this record cannot."""
+    rows = [struct.pack('<4sIII', b'NHDP', 1, len(recs), 72)]
+    for i, r in enumerate(recs):
+        v = files[r['file']]
+        if v['from'] == 'base':
+            frm, wrap = 2, bytes(32)
+        elif i in sources:
+            frm, wrap = 1, xor(key(sources[v['record']]), key(sources[i]))
+        else:
+            frm, wrap = 0, bytes(32)
+        rows.append(wrap + bytes.fromhex(v['sha256']) + struct.pack('<II', v['size'], frm))
+    return b''.join(rows)
 
 
 def xor(data, pad):
@@ -96,6 +121,7 @@ def sha(data):
 
 def make(a):
     outside_repo(a.out)
+    a.out.mkdir(parents=True, exist_ok=True)
     manifest, recs = read_manifest(a.pack)
     sources = find_sources(a.game, recs)
     files, missing = {}, []
@@ -105,7 +131,7 @@ def make(a):
             continue
         data = (a.pack / f).read_bytes()
         if a.base and (a.base / f).is_file() and (a.base / f).read_bytes() == data:
-            files[f] = {'from': 'base', 'sha256': sha(data)}
+            files[f] = {'from': 'base', 'size': len(data), 'sha256': sha(data)}
             continue
         # the first record of this file that the disc has is its key
         key = next((j for j, q in enumerate(recs) if q['file'] == f and j in sources), None)
@@ -117,6 +143,7 @@ def make(a):
     if missing:
         raise SystemExit(f'{len(missing)} files have no original on this disc and are not in --base, e.g. {missing[:5]}')
     (a.out / 'manifest.bin').write_bytes(manifest)
+    (a.out / 'index.bin').write_bytes(index_bin(recs, files, sources))
     (a.out / 'patch.json').write_text(json.dumps({'format': 'reUndr hdpatch 1', 'manifest_sha256': sha(manifest),
                                                   'files': files}, indent=1, sort_keys=True), encoding='utf-8')
     n = collections.Counter(v['from'] for v in files.values())
