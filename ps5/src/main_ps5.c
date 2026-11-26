@@ -188,7 +188,7 @@ int main(int argc,char **argv) {
  mkdir("/data/reUndr/save",0777);
  FILE *out=open_log("/data/reUndr/stdout.log",NULL),*err=open_log("/data/reUndr/stderr.log",&g_crash_log_fd);
  if(!out||!err)return 1;stdout=out;stderr=err;load_settings();
- sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.001.000\n");
+ sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.002.000\n");
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"offscreen");
  setenv("RECOMP_GIL_EAGER","1",0);setenv("RECOMP_CULL","0",0);
  setenv("RECOMP_GL_SCALE","4.5",0);setenv("RECOMP_VK_HEADLESS","0",1);

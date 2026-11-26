@@ -1,6 +1,7 @@
 01.002.000
 - Port menu: press Touchpad + Options during the game. Graphics, sound and frame rate settings are in one place and apply at once.
 - Performance overlay and a 60-second benchmark.
+- Smoother races: far fewer dropped frames in 4K.
 - Everything reUndr keeps is now in /data/reUndr. Files from /data/nfsu1 move there at the first start.
 01.001.000
 - Clean dumps work: any default.xbe next to the game folders starts.
