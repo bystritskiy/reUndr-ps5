@@ -135,10 +135,13 @@ const char *s_cur_label;
 char s_cur_value[96];
 
 /* The hint at start (until the menu has been opened once): shown when the
- * title draws a real screen for a moment, i.e. the intro movies are over. */
+ * title draws the front end for a moment, i.e. loading and the intro movies
+ * are over. The loading screen issues about 60 draws a frame and a movie 12,
+ * the front end about 490. */
 double s_busy_since, s_hint_from, s_hint_until;
 bool s_hint_done;
 constexpr double kHintSeconds = 6.0;
+constexpr unsigned kFrontEndDraws = 200;
 int s_row;                          /* within the tab's shown rows */
 uint32_t s_prev;                    /* last buttons, for edges */
 double s_repeat_at;
@@ -500,7 +503,7 @@ void hint_watch(double t)
         s_hint_done = true;
         return;
     }
-    if (nv2a_vk_frame_draws < 40) {
+    if (nv2a_vk_frame_draws < kFrontEndDraws) {
         s_busy_since = 0.0;
         return;
     }
