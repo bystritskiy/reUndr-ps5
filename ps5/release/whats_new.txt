@@ -1,3 +1,10 @@
+01.003.000
+- 120 fps on displays that take 120 Hz, VRR included; 60 elsewhere. Frame Rate offers 30, 60 and 120.
+- Races hold 120 fps in 4K: the game runs much faster on the PS5's CPU.
+- Motion Blur: Off, Low or Original.
+- Vibration strength. Both grips vibrate now, and each gear change gives a short knock.
+- The port menu has Graphics, Gameplay and Audio; arrows show where a setting can still go. The overlay shows the refresh rate and VRR.
+- Saves in /data/reUndr can be replaced with PS5Upload or FTP.
 01.002.001
 - The game's Options menu is the original again. Port settings are only in the port menu.
 01.002.000

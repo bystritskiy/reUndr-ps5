@@ -18,6 +18,8 @@ extern "C" {
 #include "pad_ps5.h"
 #include "port_options.h"
 void nfsu1_audio_mute(int on);
+extern volatile uint32_t nfsu1_ps5_output_mhz;     /* video_hz.c */
+extern volatile int nfsu1_ps5_output_vrr;
 }
 
 #include "imgui.h"
@@ -58,8 +60,8 @@ double now_s()
 
 /* ── Rows ─────────────────────────────────────────────────────────── */
 
-enum Tab { kGraphics, kLanguage, kAudio, kPerformance, kWhatsNew, kTabCount };
-const char *const kTabNames[kTabCount] = { "Graphics", "Language", "Audio", "Performance", "What's New" };
+enum Tab { kGraphics, kGameplay, kAudio, kWhatsNew, kTabCount };
+const char *const kTabNames[kTabCount] = { "Graphics", "Gameplay", "Audio", "What's New" };
 
 struct Row {
     const char *label;
@@ -73,26 +75,31 @@ const char *const kOffOn[] = { "Off", "On" };
 const char *const kAa[] = { "Off", "FXAA" };
 const char *const kAniso[] = { "Off", "2x", "4x", "8x", "16x" };
 const char *const kLod[] = { "1x", "2x", "3x", "4.5x", "6x", "8x" };
-const char *const kFps[] = { "60 fps", "30 fps" };
+const char *const kBlur[] = { "Off", "Low", "Original" };
+const char *const kVib[] = { "Off", "10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%" };
+/* Frame Rate lists 120 only on a 119.88 Hz output. */
+const char *const kFps[] = { "30 fps", "60 fps", "120 fps" };
 const char *const kTest[] = { "Off", "Front Left", "Front Right", "Centre", "Subwoofer", "Surround Left",
                               "Surround Right", "Back Left", "Back Right", "All in Turn" };
 
 const Row kRows[] = {
+    { "Frame Rate", NFSU1_OPT_FPS, kFps, kGraphics },
     { "Resolution Scale", NFSU1_OPT_SCALE, kScale, kGraphics },
     { "Anti-Aliasing", NFSU1_OPT_FXAA, kAa, kGraphics },
     { "Anisotropic Filtering", NFSU1_OPT_ANISO, kAniso, kGraphics },
     { "Square Pixels", NFSU1_OPT_SQUARE, kOffOn, kGraphics },
     { "Car Reflections", NFSU1_OPT_REFLECTIONS, kOffOn, kGraphics },
+    { "Motion Blur", NFSU1_OPT_BLUR, kBlur, kGraphics },
     { "Detail Distance", NFSU1_OPT_LOD, kLod, kGraphics },
-    { "Text", NFSU1_OPT_TEXT_LANG, nullptr, kLanguage },
-    { "Voice", NFSU1_OPT_VOICE_LANG, nullptr, kLanguage },
-    { "Music", NFSU1_OPT_MUSIC, nullptr, kLanguage },
+    { "Performance Overlay", NFSU1_OPT_OVERLAY, kOffOn, kGraphics },
+    { "Benchmark", -1, nullptr, kGraphics },
+    { "Vibration", NFSU1_OPT_VIBRATION, kVib, kGameplay },
+    { "Pause While Open", NFSU1_OPT_PAUSE, kOffOn, kGameplay },
+    { "Text", NFSU1_OPT_TEXT_LANG, nullptr, kGameplay },
+    { "Voice", NFSU1_OPT_VOICE_LANG, nullptr, kGameplay },
+    { "Music", NFSU1_OPT_MUSIC, nullptr, kGameplay },
     { "All Speakers", NFSU1_OPT_SPEAKERS, kOffOn, kAudio },
     { "Speaker Test", NFSU1_OPT_SPEAKER_TEST, kTest, kAudio },
-    { "Frame Rate", NFSU1_OPT_FPS, kFps, kPerformance },
-    { "Performance Overlay", NFSU1_OPT_OVERLAY, kOffOn, kPerformance },
-    { "Pause While Open", NFSU1_OPT_PAUSE, kOffOn, kPerformance },
-    { "Benchmark", -1, nullptr, kPerformance },
 };
 constexpr int kRowCount = (int)(sizeof kRows / sizeof kRows[0]);
 
@@ -120,6 +127,26 @@ const char *value_text(const Row &r, int v, char *buf, unsigned cap)
     return r.values ? r.values[v] : nfsu1_opt_lang_text(r.option, v, buf, cap);
 }
 
+/* A row's value as drawn: on the selected row between arrows, each only while
+ * the value can still go that way (left lowers it, right raises it). */
+struct Value {
+    char text[80];
+    bool selected, less, more;
+};
+
+/* Right-aligned at `right`; the arrows keep their places when one is hidden. */
+void draw_value(ImDrawList *dl, float right, float y, const Value &v, ImU32 col)
+{
+    float x = right - ImGui::CalcTextSize(v.text).x;
+    if (v.selected) {
+        const float gap = ImGui::CalcTextSize("  ").x;
+        x -= gap + ImGui::CalcTextSize(">").x;
+        if (v.more) dl->AddText(ImVec2(right - ImGui::CalcTextSize(">").x, y), col, ">");
+        if (v.less) dl->AddText(ImVec2(x - gap - ImGui::CalcTextSize("<").x, y), col, "<");
+    }
+    dl->AddText(ImVec2(x, y), col, v.text);
+}
+
 /* ── State (the executor thread only) ─────────────────────────────── */
 
 volatile int s_open;
@@ -132,7 +159,7 @@ bool s_peek;
 float s_peek_t;                     /* 0 menu .. 1 row only, eased */
 ImVec2 s_cur_min, s_cur_max;        /* the selected row, as last drawn */
 const char *s_cur_label;
-char s_cur_value[96];
+Value s_cur_value;
 
 /* The hint at start (until the menu has been opened once): shown when the
  * title draws the front end for a moment, i.e. loading and the intro movies
@@ -317,11 +344,11 @@ void bench_finish(double t)
     s_result.until = t + 20.0;
 
     char opts[192];
-    snprintf(opts, sizeof opts, "scale %s, aa %s, aniso %s, square %s, reflections %s, lod %s, %s",
+    snprintf(opts, sizeof opts, "scale %s, aa %s, aniso %s, square %s, reflections %s, blur %s, lod %s, %s",
              kScale[nfsu1_opt_get(NFSU1_OPT_SCALE)], kAa[nfsu1_opt_get(NFSU1_OPT_FXAA)],
              kAniso[nfsu1_opt_get(NFSU1_OPT_ANISO)], kOffOn[nfsu1_opt_get(NFSU1_OPT_SQUARE)],
-             kOffOn[nfsu1_opt_get(NFSU1_OPT_REFLECTIONS)], kLod[nfsu1_opt_get(NFSU1_OPT_LOD)],
-             kFps[nfsu1_opt_get(NFSU1_OPT_FPS)]);
+             kOffOn[nfsu1_opt_get(NFSU1_OPT_REFLECTIONS)], kBlur[nfsu1_opt_get(NFSU1_OPT_BLUR)],
+             kLod[nfsu1_opt_get(NFSU1_OPT_LOD)], kFps[nfsu1_opt_get(NFSU1_OPT_FPS)]);
     char line[320];
     snprintf(line, sizeof line, "%.1f fps average, %.1f fps 1%% low, worst %.1f ms, %d frames in %.0f s (%s)",
              s_result.avg_fps, s_result.low_fps, s_result.worst_ms, n, total / 1000.0, opts);
@@ -639,22 +666,24 @@ void draw_menu_window()
                               IM_COL32(255, 255, 255, 34), 6.0f * s_ui);
         float ty = p.y + (row_h - ImGui::GetTextLineHeight()) * 0.5f;
         dl->AddText(ImVec2(p.x, ty), ImGui::GetColorU32(ImGuiCol_Text), r.label);
-        char value[96], text[80];
+        Value value = {};
         if (r.option >= 0) {
+            char text[80];
             int v = nfsu1_opt_get(r.option);
-            snprintf(value, sizeof value, i == s_row ? "<  %s  >" : "%s", value_text(r, v, text, sizeof text));
+            snprintf(value.text, sizeof value.text, "%s", value_text(r, v, text, sizeof text));
+            value.selected = i == s_row;
+            value.less = v > 0;
+            value.more = v < nfsu1_opt_steps(r.option) - 1;
         } else {
-            snprintf(value, sizeof value, "%.0f s", kBenchSeconds);
+            snprintf(value.text, sizeof value.text, "%.0f s", kBenchSeconds);
         }
-        float vw = ImGui::CalcTextSize(value).x;
         if (i == s_row) {
             s_cur_min = ImVec2(p.x - 10.0f * s_ui, p.y);
             s_cur_max = ImVec2(q.x + 10.0f * s_ui, q.y);
             s_cur_label = r.label;
-            snprintf(s_cur_value, sizeof s_cur_value, "%s", value);
+            s_cur_value = value;
         }
-        dl->AddText(ImVec2(q.x - vw, ty),
-                    ImGui::GetColorU32(i == s_row ? ImGuiCol_Text : ImGuiCol_TextDisabled), value);
+        draw_value(dl, q.x, ty, value, ImGui::GetColorU32(i == s_row ? ImGuiCol_Text : ImGuiCol_TextDisabled));
         ImGui::Dummy(ImVec2(q.x - p.x, row_h));
     }
     /* Every tab as tall as the longest, so the window keeps its place. */
@@ -685,8 +714,7 @@ void draw_menu()
     float ty = s_cur_min.y + (s_cur_max.y - s_cur_min.y - h) * 0.5f;
     ImU32 text = IM_COL32(235, 235, 240, (int)(255 * a));
     fg->AddText(ImVec2(s_cur_min.x + 10.0f * s_ui, ty), text, s_cur_label);
-    float vw = ImGui::CalcTextSize(s_cur_value).x;
-    fg->AddText(ImVec2(s_cur_max.x - 10.0f * s_ui - vw, ty), text, s_cur_value);
+    draw_value(fg, s_cur_max.x - 10.0f * s_ui, ty, s_cur_value, text);
 }
 
 /* The race HUD fills the corners: the overlay sits at the top centre, the
@@ -724,6 +752,11 @@ void draw_overlay()
     ImGui::PlotLines("##frames", ordered, s_frame_count, 0, nullptr, 0.0f, 50.0f,
                      ImVec2(320.0f * s_ui, 54.0f * s_ui));
     ImGui::TextDisabled("%u draws per frame", nv2a_vk_frame_draws);
+    if (nfsu1_ps5_output_mhz) {             /* the output: 120 or 60 Hz, VRR when the display runs it */
+        ImGui::SameLine(0.0f, 24.0f * s_ui);
+        ImGui::TextDisabled("%u Hz%s", (unsigned)((nfsu1_ps5_output_mhz + 500) / 1000),
+                            nfsu1_ps5_output_vrr ? " VRR" : "");
+    }
     ImGui::PopFont();
     ImGui::End();
 }

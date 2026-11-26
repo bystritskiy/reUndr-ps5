@@ -42,6 +42,9 @@ int scePadReadState(int handle, void *out)
 }
 int scePadSetVibration(int handle, const void *data)
 { int i=handle-100;assert(i>=0&&i<4);memcpy(motors[i],data,2);return 0; }
+/* gear_pulse_ps5.c: no race here. */
+void nfsu1_gear_pulse_motors(unsigned port, uint8_t large, uint8_t small) { (void)port;(void)large;(void)small; }
+void nfsu1_gear_pulse_update(unsigned port, int handle, int menu_open) { (void)port;(void)handle;(void)menu_open; }
 static void filter(void *state, unsigned port)
 { assert(state&&port<2);filter_calls[port]++; }
 extern void xbox_InputSetHostFilter(void (*)(void *,unsigned));
@@ -66,7 +69,8 @@ int main(void)
     XBOX_VIBRATION v1={.wLeftMotorSpeed=0xabcd,.wRightMotorSpeed=0x1234};
     XBOX_VIBRATION v2={.wLeftMotorSpeed=0x4567,.wRightMotorSpeed=0x89ab};
     assert(!xbox_InputSetState(0,&v1)&&!xbox_InputSetState(1,&v2));
-    assert(motors[0][0]==0xab&&motors[0][1]==0x12&&motors[1][0]==0x45&&motors[1][1]==0x89);
+    /* The right grip follows the large motor unless the small one is stronger. */
+    assert(motors[0][0]==0xab&&motors[0][1]==0xab&&motors[1][0]==0x45&&motors[1][1]==0x89);
     assert(xbox_InputSetState(2,&v1)==ERROR_DEVICE_NOT_CONNECTED);
     XBOX_INPUT_CAPABILITIES caps;assert(!xbox_InputGetCapabilities(1,0,&caps)&&caps.Type==1);
     /* Port menu. Options or Touchpad alone reaches the title 100 ms late and a

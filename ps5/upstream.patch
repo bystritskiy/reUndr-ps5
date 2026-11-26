@@ -106,10 +106,10 @@ index ad4c36c..d44c6e0 100644
  
      g_esp = XBOX_STACK_TOP;
 diff --git a/src/recomp_manual.c b/src/recomp_manual.c
-index 04dc96a..c03f700 100644
+index 04dc96a..8ec8db6 100644
 --- a/src/recomp_manual.c
 +++ b/src/recomp_manual.c
-@@ -18,6 +18,9 @@
+@@ -18,12 +18,16 @@
   *   - Intercept D3D/audio calls for custom rendering or sound
   */
  
@@ -119,29 +119,334 @@ index 04dc96a..c03f700 100644
  #include <stdio.h>
  #include <stdint.h>
  #include <stddef.h>
-@@ -242,15 +245,16 @@ extern void nv2a_pb_trap_lock(void);
+ #include <string.h>
+ #include <stdlib.h>
+ #include <math.h>
++#include <sys/stat.h>
+ 
+ /* The generated register model (g_eax/g_esp are thread-local there) and the
+  * XBOX_PTR/MEM32 accessors; the register names below are its macros. */
+@@ -241,20 +245,303 @@ extern void nv2a_pb_trap_lock(void);
+  * wrapper rewrites the interval to 1 as the trap is taken, so a frame ready
   * in time shows on the next vblank (60 fps at most); slower frames are
   * unchanged. NFSU2_FPS_CAP=30 keeps the title's interval. (Same D3D code
-  * and trap format as NFSU2.) */
-+static int s_fps30 = -1;                /* -1: NFSU2_FPS_CAP not read yet */
+- * and trap format as NFSU2.) */
+-static int fps_cap_30(void)
++ * and trap format as NFSU2.)
++ *
++ * 120 fps (PS5): where the output runs at 119.88 Hz (video_hz.c), the guest
++ * vblank runs at that rate too, so the same one-vblank interval allows 120.
++ * The game keeps time from its 4000 Hz timer (sub_00140920), not from
++ * vblanks. Below 120 the vblank stays at 59.94 Hz, and on a fixed 119.88 Hz
++ * output VideoOut shows each flip for at least two vblanks
++ * (wsi_videoout_set_flip_rate), so 60 stays even; a VRR output follows the
++ * flips itself. NFSU2_FPS_CAP=120 makes 120 the default, as fps=120 in
++ * nfsu1x_options.txt does; without such an output 120 means 60. */
++static int s_fps = -1;                  /* 30, 60, 120; -1: NFSU2_FPS_CAP not read yet */
 +static int s_fps_saved;                 /* nfsu1x_options.txt had fps= */
- static int fps_cap_30(void)
++static int fps_wanted(void)
  {
 -    static int v = -1;
 -    if (v < 0) {
-+    if (s_fps30 < 0) {
++    if (s_fps < 0) {
          const char *e = getenv("NFSU2_FPS_CAP");
 -        v = e && atoi(e) == 30;
 -        fprintf(stderr, "[fps] cap: %s\n", v ? "30 (title)" : "60 (NFSU2_FPS_CAP=30 for 30)");
-+        s_fps30 = e && atoi(e) == 30;
-+        fprintf(stderr, "[fps] cap: %s\n", s_fps30 ? "30 (title)" : "60 (NFSU2_FPS_CAP=30 for 30)");
++        int v = e ? atoi(e) : 60;
++        s_fps = v == 30 || v == 120 ? v : 60;
++        fprintf(stderr, "[fps] cap: %d (NFSU2_FPS_CAP)\n", s_fps);
      }
 -    return v;
-+    return s_fps30;
++    return s_fps;
++}
++#ifdef NFSU1_PS5
++extern volatile uint32_t nfsu1_ps5_output_mhz;   /* video_hz.c: 0 until known */
++extern volatile int nfsu1_ps5_output_check, nfsu1_ps5_output_vrr;
++extern int wsi_videoout_set_flip_rate(int rate); /* PS5_Mesa: each flip >= rate + 1 vblanks */
++extern void xbox_vblank_set_hz(double hz);
++extern int nv2a_vk_fps_high;                     /* nv2a_vk.c */
++static int fps_120_offered(void) { return nfsu1_ps5_output_mhz >= 119000; }
++#else
++static int fps_120_offered(void) { return 0; }
++#endif
++/* The rate in force: 120 only on a 119.88 Hz output. */
++static int fps_now(void)
++{
++    int f = fps_wanted();
++    return f == 120 && !fps_120_offered() ? 60 : f;
++}
++static int fps_cap_30(void)
++{
++#ifdef NFSU1_PS5
++    if (nfsu1_ps5_output_check)
++        return 0;
++#endif
++    return fps_now() == 30;
++}
++/* At each flip: the guest vblank and VideoOut's flip rate for the rate in
++ * force, when it or the output changes. */
++static void fps_apply(void)
++{
++#ifdef NFSU1_PS5
++    static int applied = -1;
++    int check = nfsu1_ps5_output_check, f = check ? 120 : fps_now();
++    int key = f * 4 + fps_120_offered() * 2 + check;
++    if (key == applied)
++        return;
++    applied = key;
++    xbox_vblank_set_hz(f == 120 ? 119.88 : 59.94);
++    nv2a_vk_fps_high = f == 120;
++    /* The motion blur fades in and out (sub_000286E0) by a step a frame,
++     * 0x21C0BC (0.2) and 0x21C0C0 (0.1), only read there: at 120 fps half
++     * of each, so it takes as long as at 60. */
++    MEMF(0x0021C0BCu) = f == 120 ? 0.1f : 0.2f;
++    MEMF(0x0021C0C0u) = f == 120 ? 0.05f : 0.1f;
++    if (!check && nfsu1_ps5_output_mhz) {
++        int rate = fps_120_offered() && !nfsu1_ps5_output_vrr && f < 120;
++        fprintf(stderr, "[fps] %d fps on a %.3f Hz output%s\n", f, nfsu1_ps5_output_mhz / 1000.0,
++                rate ? ", each flip >= 2 vblanks" : "");
++        wsi_videoout_set_flip_rate(rate);
++    }
++#endif
  }
  extern void nv2a_pb_trap_unlock(void);
  extern void nv2a_pb_trap_taken(void);
-@@ -418,16 +422,39 @@ static int hud_wide_on(void)
+ 
++/* ── Game time above 60 fps (sub_001410D0, sub_00141200) ─────
++ *
++ * Each frame sub_001410D0 turns the real frame time into the world's:
++ * dt = real * 1.0167 + the last frame's rounding, clamped to 1/60 .. 3/60 s
++ * ([0x25314C] = 3 steps), rounded to 1/3600 s ticks (sub_001408F0) with the
++ * remainder carried, recorded in the replay stream (sub_001385F0: the ticks
++ * in 8 bits, the frame counter's low 4) or, while a replay plays, read from
++ * it (sub_00138550). sub_00141200 then counts 60 Hz world ticks, at least
++ * one a frame. Above 60 fps both run the world fast: a lap timer gained
++ * 20.25 s in 16.6 s at 72 fps (console, 2026-11-26). At 120 fps the floor is
++ * 1/240 s and a frame may add no world tick; below that both are the
++ * original. Replay playback (its ticks from the stream) is left as it is. */
++extern void sub_001410D0_gen(void);
++extern void sub_00141200_gen(void);
++extern void sub_001385F0(void);
++
++void sub_001410D0(void)
++{
++    if (fps_now() != 120 || MEM32(0x2CA14Cu)) {
++        sub_001410D0_gen();
++        return;
++    }
++    float real = MEMF(esp + 4);
++    float base = MEM32(0x25313Cu) ? MEMF(0x1F8190u) : MEMF(0x1F84A8u);   /* 1/60, 1/50 */
++    float cap = MEMF(0x25314Cu) * base;
++    float dt = real * MEMF(0x207AB4u) + MEMF(0x2CA430u);
++    if (!(dt > base * 0.25f))
++        dt = base * 0.25f;
++    if (cap < dt)
++        dt = cap;
++    /* 1/3600 s ticks (sub_001408F0); the carry is what they miss of dt,
++     * counted in 1/4000 s as the original does. */
++    uint32_t ticks = (uint32_t)(int32_t)(dt * MEMF(0x2079CCu) + MEMF(0x1F432Cu));
++    uint32_t frame = MEM32(0x2CA434u) & 0xFu;
++    int32_t t4000 = (int32_t)((float)(int32_t)ticks * MEMF(0x1FB030u) * MEMF(0x1F4DA4u) + MEMF(0x1F432Cu));
++    MEMF(0x2CA430u) = dt - (float)t4000 * MEMF(0x1F44CCu);
++    PUSH32(esp, 3); PUSH32(esp, 8); PUSH32(esp, ticks);
++    PUSH32(esp, 0x001411CEu); RECOMP_ABI_CALL(0x001385F0u, sub_001385F0);
++    esp += 12;
++    PUSH32(esp, 5); PUSH32(esp, 4); PUSH32(esp, frame);
++    PUSH32(esp, 0x001411D8u); RECOMP_ABI_CALL(0x001385F0u, sub_001385F0);
++    esp += 12;
++    MEM32(0x2CA428u) = ticks;
++    MEMF(0x253164u) = (float)(int32_t)ticks * MEMF(0x1FB030u);   /* sub_001408E0 */
++    esp += 4;
++}
++
++void sub_00141200(void)
++{
++    if (fps_now() != 120) {
++        sub_00141200_gen();
++        return;
++    }
++    float dt = MEMF(0x253164u), acc = dt + MEMF(0x2CA42Cu);
++    int32_t n = (int32_t)(acc * MEMF(0x1F41D8u));                  /* 60 */
++    MEMF(0x2CA42Cu) = acc - (float)n * MEMF(0x1F8190u);
++    MEM32(0x253144u) += (uint32_t)n;
++    MEM32(0x253148u) = (uint32_t)n;
++    MEM32(0x253140u) = MEM32(0x253144u);
++    MEM32(0x2CA448u) += (uint32_t)(int32_t)(dt * MEMF(0x1F4DA4u) + MEMF(0x1F432Cu));
++    MEM32(0x2CA434u) += 1;
++    eax = MEM32(0x2CA434u);
++    esp += 4;
++}
++
++/* ── Native maths for the hottest library routines (120 fps) ─────────────
++ *
++ * In a 120 fps race these were among the main thread's busiest functions
++ * (console profile, 2026-11-26): lifted, every SSE register is a
++ * thread-local in memory and the x87 stack an array. Each is the same
++ * arithmetic in the same order -- single precision for SSE, double for x87
++ * as the lifter models it -- so results do not change. */
++#include <immintrin.h>
++
++/* 4x4 multiply, stdcall (out, a, b), returns out: out row i =
++ * ((a.x*b0 + a.y*b1) + a.z*b2) + a.w*b3. All rows are computed before any is
++ * stored, as the original keeps them in xmm2-5: out may be a or b. */
++void sub_00169F4A(void)
++{
++    uint32_t out = MEM32(esp + 4), a = MEM32(esp + 8), b = MEM32(esp + 12);
++    const float *pa = (const float *)XBOX_PTR(a), *pb = (const float *)XBOX_PTR(b);
++    __m128 b0 = _mm_loadu_ps(pb), b1 = _mm_loadu_ps(pb + 4), b2 = _mm_loadu_ps(pb + 8),
++           b3 = _mm_loadu_ps(pb + 12), r[4];
++    int i;
++    for (i = 0; i < 4; i++) {
++        __m128 ai = _mm_loadu_ps(pa + 4 * i);
++        __m128 s = _mm_add_ps(_mm_mul_ps(_mm_shuffle_ps(ai, ai, 0x00), b0),
++                              _mm_mul_ps(_mm_shuffle_ps(ai, ai, 0x55), b1));
++        s = _mm_add_ps(s, _mm_mul_ps(_mm_shuffle_ps(ai, ai, 0xAA), b2));
++        r[i] = _mm_add_ps(s, _mm_mul_ps(_mm_shuffle_ps(ai, ai, 0xFF), b3));
++    }
++    for (i = 0; i < 4; i++)
++        _mm_storeu_ps((float *)XBOX_PTR(out + 16 * i), r[i]);
++    eax = out;
++    esp += 4 + 12;                              /* ret 0xc */
++}
++
++/* _ftol2 (MSVC CRT): st(0) truncated toward zero into edx:eax, popped; NaN
++ * and |x| >= 2^63 give the integer indefinite, as its fistp does. */
++void sub_001B2344(void)
++{
++    double *st = recomp_fp_base();
++    int top = recomp_fp_top_ld();
++    double x = st[top];
++    int64_t v = (x == x && x < 9223372036854775808.0 && x >= -9223372036854775808.0)
++                ? (int64_t)x : INT64_MIN;
++    recomp_fp_top_st((top + 1) & 7);
++    eax = (uint32_t)(uint64_t)v;
++    edx = (uint32_t)((uint64_t)v >> 32);
++    esp += 4;
++}
++
++/* Matrix times vector, cdecl (out, m, v), returns out; x87, each sum in the
++ * original order:  y = ((m13 w + m1 x) + m9 z) + m5 y,  z and w alike with
++ * m14/m2/m10/m6 and m15/m3/m11/m7,  x = ((m12 w + m8 z) + m4 y) + m0 x.
++ * v is read in full before out is written. */
++void sub_00124040(void)
++{
++    uint32_t out = MEM32(esp + 4), mp = MEM32(esp + 8), vp = MEM32(esp + 12);
++    const float *m = (const float *)XBOX_PTR(mp), *v = (const float *)XBOX_PTR(vp);
++    double vx = v[0], vy = v[1], vz = v[2], vw = v[3];
++    float y = (float)(((m[13] * vw + m[1] * vx) + m[9] * vz) + m[5] * vy);
++    float z = (float)(((m[14] * vw + m[2] * vx) + m[10] * vz) + m[6] * vy);
++    float w = (float)(((m[15] * vw + m[3] * vx) + m[11] * vz) + m[7] * vy);
++    float x = (float)(((m[12] * vw + m[8] * vz) + m[4] * vy) + m[0] * vx);
++    float *o = (float *)XBOX_PTR(out);
++    uint32_t wbits;
++    memcpy(&wbits, &w, 4);
++    MEMF(esp + 12) = w;                         /* its temporary: the v argument's slot */
++    o[3] = w;
++    o[0] = x;
++    o[1] = y;
++    o[2] = z;
++    ecx = wbits;
++    eax = out;
++    esp += 4;
++}
++
++/* An AABB through a matrix (sub_00018B40's arithmetic): both bounds start at
++ * the translation (m12..m14); for rows r = 0..2 and columns j = 0..2,
++ * a = min[r]*m[4r+j], b = (float)(max[r]*m[4r+j]); if a < b the minimum takes
++ * a and the maximum b, else the minimum b and the maximum a (b is stored and
++ * reloaded as a float in the original, a stays on the x87 stack). */
++static void aabb_transform(const float *m, float mn[3], float mx[3])
++{
++    double lo[3] = { m[12], m[13], m[14] }, hi[3] = { m[12], m[13], m[14] };
++    int r, j;
++    for (r = 0; r < 3; r++)
++        for (j = 0; j < 3; j++) {
++            double a = (double)mn[r] * m[4 * r + j];
++            float b = (float)((double)mx[r] * m[4 * r + j]);
++            if (a < b) {
++                lo[j] += a;
++                hi[j] += b;
++            } else {
++                lo[j] += b;
++                hi[j] += a;
++            }
++        }
++    for (j = 0; j < 3; j++) {
++        mn[j] = (float)lo[j];
++        mx[j] = (float)hi[j];
++    }
++}
++
++/* cdecl (m, min, max): the AABB in place. */
++void sub_00018B40(void)
++{
++    uint32_t pm = MEM32(esp + 4), pmin = MEM32(esp + 8), pmax = MEM32(esp + 12);
++    float mn[3], mx[3];
++    int k;
++    for (k = 0; k < 3; k++) {
++        mn[k] = MEMF(pmin + 4 * k);
++        mx[k] = MEMF(pmax + 4 * k);
++    }
++    aabb_transform((const float *)XBOX_PTR(pm), mn, mx);
++    for (k = 0; k < 3; k++) {
++        MEMF(pmin + 4 * k) = mn[k];
++        MEMF(pmax + 4 * k) = mx[k];
++    }
++    esp += 4;
++}
++
++/* Frustum against an AABB, thiscall (min, max, matrix or 0), ret 0xc: the
++ * box (through the matrix when given) as centre c = (max + min) * 0.5 and
++ * half size h = max - c, each stored as a float; for the six planes at
++ * [this] + 0xC0 (nx, ny, nz, d): r = (|ny| hy + |nz| hz) + |nx| hx,
++ * s = ((cy ny + cz nz) + cx nx) + d; s + r < 0 is outside (0), any s - r < 0
++ * intersecting (1), else inside (2). */
++void sub_00018C30(void)
++{
++    uint32_t pmin = MEM32(esp + 4), pmax = MEM32(esp + 8), pm = MEM32(esp + 12);
++    uint32_t planes = MEM32(ecx) + 0xC0;
++    float mn[3], mx[3], c[3], h[3];
++    int k, inter = 0;
++    for (k = 0; k < 3; k++) {
++        mn[k] = MEMF(pmin + 4 * k);
++        mx[k] = MEMF(pmax + 4 * k);
++    }
++    if (pm)
++        aabb_transform((const float *)XBOX_PTR(pm), mn, mx);
++    for (k = 0; k < 3; k++)
++        c[k] = (float)(((double)mx[k] + mn[k]) * MEMF(0x1F432Cu));      /* 0.5f */
++    for (k = 0; k < 3; k++)
++        h[k] = (float)((double)mx[k] - c[k]);
++    eax = 2;
++    for (k = 0; k < 6; k++) {
++        const float *p = (const float *)XBOX_PTR(planes + 16 * k);
++        double r = (fabs((double)p[1]) * h[1] + fabs((double)p[2]) * h[2]) + fabs((double)p[0]) * h[0];
++        double s = (((double)c[1] * p[1] + (double)c[2] * p[2]) + (double)c[0] * p[0]) + p[3];
++        if (s + r < 0.0) {
++            eax = 0;
++            break;
++        }
++        if (s - r < 0.0)
++            inter = 1;
++    }
++    if (eax && inter)
++        eax = 1;
++    esp += 4 + 12;                              /* ret 0xc */
++}
++
+ void sub_001DA120(void)
+ {
+     volatile uint32_t *nv = (volatile uint32_t *)XBOX_PTR(0xFD000000u);
+@@ -265,6 +552,8 @@ void sub_001DA120(void)
+     nv2a_pb_trap_lock();
+     head = MEM32(blk + 0x1BC);   /* under the locks, as in sub_001D9BB0 */
+     nsource = nv[0x400108 / 4];
++    if (nsource && (nv[0x400704 / 4] & 0xFFFFu) == 0x0100u && (nv[0x400708 / 4] & 0x1Fu) == 1u)
++        fps_apply();
+     if (nsource && (nv[0x400704 / 4] & 0xFFFFu) == 0x0100u && !fps_cap_30()) {
+         uint32_t data = nv[0x400708 / 4];
+         if ((data & 0x1Fu) == 1u && ((data >> 5) & 7u) > 1u) {
+@@ -418,16 +707,41 @@ static int hud_wide_on(void)
      return on;
  }
  
@@ -178,11 +483,13 @@ index 04dc96a..c03f700 100644
  /* Game flow state: 3 in the front end, 4 loading, 6 racing (the game
   * itself tests `cmp [0x283434], 3`). */
  #define NFSU1_GAMEFLOW_STATE 0x00283434u
++/* For the gear pulse (gear_pulse_ps5.c). */
++int nfsu1_in_race(void) { return MEM32(NFSU1_GAMEFLOW_STATE) == 6; }
 +#define FE_YAW_ZOOM 1.3f
  
  void sub_00018E40(void)
  {
-@@ -477,8 +504,16 @@ void sub_00018E40(void)
+@@ -477,8 +791,16 @@ void sub_00018E40(void)
              yaw = (e ? (float)atof(e) : 5.0f) * 3.14159265f / 180.0f;
          }
          if (yaw != 0.0f) {
@@ -200,17 +507,17 @@ index 04dc96a..c03f700 100644
              memcpy(m, (void *)XBOX_PTR(ecx), sizeof m);
              for (j = 0; j < 4; j++) {
                  float r0 = m[j], r2 = m[8 + j];
-@@ -599,26 +634,10 @@ void sub_000192C0(void)
+@@ -599,26 +921,10 @@ void sub_000192C0(void)
          memcpy((void *)XBOX_PTR(quad + 0x10 + i * 16), &original_x[i], 4);
  }
  
 -/* ── Options -> Camera: car reflections and picture rows ──────
-- *
++/* ── Port settings: car reflections, picture and sound ───────
+  *
 - * The port's own settings, as NFSU2 has them under Options -> Video, live
 - * on the Camera screen: Display already has seven rows and no room for
 - * more, Camera has two (Favorite Drive Camera, Jump Cameras).
-+/* ── Port settings: car reflections, picture and sound ───────
-  *
+- *
 - * All option screens are one class on MU_Options.fng; the Options menu
 - * leaves the chosen one in [0x2BBB54] (1 = Camera) and the screen calls
 - * its setup: sub_000C2A70 for Camera. A row N (1..10) is the package's
@@ -230,7 +537,7 @@ index 04dc96a..c03f700 100644
   *
   * Car Reflections Off: the Vulkan renderer's cube stages sample black
   * (nv2a_vk_cube_maps; the GL renderer never drew them) and the race
-@@ -626,9 +645,9 @@ void sub_000192C0(void)
+@@ -626,9 +932,9 @@ void sub_000192C0(void)
   * 10..15, view(id) = 0x2C5F20 + id*0x60, drawn only while byte +8 is set):
   * the bytes are cleared for the call and put back after it.
   *
@@ -242,7 +549,7 @@ index 04dc96a..c03f700 100644
   * (nv2a_vk_fxaa), Anisotropic Off..16x (nv2a_vk_aniso), Square Pixels
   * (nv2a_vk_square: 4/3 the columns in 16:9). The renderer's env switches
   * still force each off.
-@@ -639,12 +658,8 @@ void sub_000192C0(void)
+@@ -639,12 +945,8 @@ void sub_000192C0(void)
  #ifdef __SWITCH__
  #  define NFSU1_OPTIONS_FILE "sdmc:/switch/nfsu1x/nfsu1x_options.txt"
  #else
@@ -256,7 +563,7 @@ index 04dc96a..c03f700 100644
  #define ENVMAP_VIEW(id) (0x002C5F20u + (uint32_t)(id) * 0x60u)
  
  #ifdef NFSU2_VULKAN
-@@ -653,14 +668,27 @@ extern volatile int nv2a_vk_scale_pct;
+@@ -653,14 +955,27 @@ extern volatile int nv2a_vk_scale_pct;
  extern volatile int nv2a_vk_fxaa;
  extern volatile int nv2a_vk_aniso;
  extern volatile int nv2a_vk_square;
@@ -287,7 +594,7 @@ index 04dc96a..c03f700 100644
  static int s_refl = 1;                  /* 0 off, 1 on */
  static int s_scale_idx = 1;             /* into s_scale_pct: 1.5x */
  static int s_scale_saved;               /* nfsu1x_options.txt had scale= */
-@@ -668,14 +696,6 @@ static int s_fxaa = 1;                  /* 0 off, 1 on */
+@@ -668,14 +983,6 @@ static int s_fxaa = 1;                  /* 0 off, 1 on */
  static int s_aniso_idx = 4;             /* into s_aniso_lvl: 16x */
  static int s_square = 1;                /* 0 off, 1 on */
  
@@ -302,7 +609,39 @@ index 04dc96a..c03f700 100644
  static void refl_changed(void)
  {
  #ifdef NFSU2_VULKAN
-@@ -698,24 +718,9 @@ static void picture_changed(void)
+@@ -683,6 +990,31 @@ static void refl_changed(void)
+ #endif
+ }
+ 
++/* Motion blur (sub_000286E0, as NFSU2's sub_000A9180): its strength is capped
++ * at 0x21C0B4 (0.65) and its copies spread by 0x21C0B8 (1.75); both are only
++ * read there. A cap of 0 leaves the pass out, as at low speed. */
++#define BLUR_CAP        0x0021C0B4u
++#define BLUR_SPREAD     0x0021C0B8u
++static int s_blur = 2;                  /* 0 off, 1 low, 2 original */
++static int s_vib_idx = 10;              /* vibration in 10% steps: 100% */
++
++#ifdef NFSU1_PS5
++extern volatile int nfsu1_vibration_pct;   /* input_ps5.c: scales the pad's motors */
++#endif
++static void vib_changed(void)
++{
++#ifdef NFSU1_PS5
++    nfsu1_vibration_pct = s_vib_idx * 10;
++#endif
++}
++
++static void blur_changed(void)
++{
++    static const float cap[3] = { 0.0f, 0.325f, 0.65f }, spread[3] = { 1.75f, 0.875f, 1.75f };
++    MEMF(BLUR_CAP) = cap[s_blur];
++    MEMF(BLUR_SPREAD) = spread[s_blur];
++}
++
+ #ifdef NFSU2_VULKAN
+ static void scale_changed(void)
+ {
+@@ -698,24 +1030,11 @@ static void picture_changed(void)
  }
  #endif
  
@@ -324,11 +663,13 @@ index 04dc96a..c03f700 100644
 -
  static void options_log(void)
  {
-+    fprintf(stderr, "[options] LOD distance %gx\n", (double)s_lod_scale);
++    static const char *const blur[3] = { "off", "low", "original" };
++    fprintf(stderr, "[options] LOD distance %gx, motion blur %s, vibration %d%%\n", (double)s_lod_scale,
++            blur[s_blur], s_vib_idx * 10);
  #ifdef NFSU2_VULKAN
      fprintf(stderr, "[options] car reflections %s, resolution scale %d%%%s, anti-aliasing %s,"
              " anisotropic %dx, square pixels %s\n",
-@@ -733,6 +738,13 @@ void nfsu1_options_load(void)
+@@ -733,10 +1052,25 @@ void nfsu1_options_load(void)
      FILE *f = fopen(NFSU1_OPTIONS_FILE, "r");
      int i;
  
@@ -342,7 +683,19 @@ index 04dc96a..c03f700 100644
      if (f) {
          while (fgets(line, sizeof line, f)) {
              if (!strncmp(line, "reflections=", 12))
-@@ -747,9 +759,32 @@ void nfsu1_options_load(void)
+                 s_refl = line[12] != '0';
++            else if (!strncmp(line, "motion_blur=", 12)) {
++                int b = atoi(line + 12);
++                s_blur = b < 0 ? 0 : b > 2 ? 2 : b;
++            }
++            else if (!strncmp(line, "vibration=", 10)) {
++                int v = atoi(line + 10);
++                s_vib_idx = v < 0 ? 0 : v > 100 ? 10 : (v + 5) / 10;
++            }
+             else if (!strncmp(line, "fxaa=", 5))
+                 s_fxaa = line[5] != '0';
+             else if (!strncmp(line, "square=", 7))
+@@ -747,9 +1081,33 @@ void nfsu1_options_load(void)
                      if (s_aniso_lvl[i] == a)
                          s_aniso_idx = i;
              }
@@ -354,7 +707,8 @@ index 04dc96a..c03f700 100644
 +#endif
 +#ifdef NFSU2_VULKAN
 +            else if (!strncmp(line, "fps=", 4)) {
-+                s_fps30 = atoi(line + 4) == 30;
++                int v = atoi(line + 4);
++                s_fps = v == 30 || v == 120 ? v : 60;
 +                s_fps_saved = 1;
 +            }
 +            else if (!strncmp(line, "overlay=", 8))
@@ -376,7 +730,7 @@ index 04dc96a..c03f700 100644
                      if (s_scale_pct[i] == pct) {
                          s_scale_idx = i;
                          s_scale_saved = 1;
-@@ -758,6 +793,10 @@ void nfsu1_options_load(void)
+@@ -758,7 +1116,13 @@ void nfsu1_options_load(void)
          }
          fclose(f);
      }
@@ -385,9 +739,12 @@ index 04dc96a..c03f700 100644
 +#endif
 +    lod_changed();
      refl_changed();
++    blur_changed();
++    vib_changed();
  #ifdef NFSU2_VULKAN
      {
-@@ -766,7 +805,7 @@ void nfsu1_options_load(void)
+         const char *e = getenv("RECOMP_GL_SCALE");
+@@ -766,7 +1130,7 @@ void nfsu1_options_load(void)
              /* RECOMP_GL_SCALE stays in charge until the option is changed;
               * the row shows the nearest step. */
              double k = strtod(e, NULL), best = 1e9;
@@ -396,12 +753,13 @@ index 04dc96a..c03f700 100644
                  double d = fabs(k * 100.0 - s_scale_pct[i]);
                  if (d < best) { best = d; s_scale_idx = i; }
              }
-@@ -786,130 +825,156 @@ static void options_save(void)
+@@ -786,131 +1150,234 @@ static void options_save(void)
          fprintf(stderr, "[options] cannot write " NFSU1_OPTIONS_FILE "\n");
          return;
      }
 -    fprintf(f, "reflections=%d\n", s_refl);
-+    fprintf(f, "reflections=%d\nlod=%d\n", s_refl, s_lod_pct[s_lod_idx]);
++    fprintf(f, "reflections=%d\nmotion_blur=%d\nvibration=%d\nlod=%d\n", s_refl, s_blur, s_vib_idx * 10,
++            s_lod_pct[s_lod_idx]);
 +#ifdef NFSU1_PS5
 +    fprintf(f,"audio_spread=%d\n",s_audio_spread);
 +    for(int i=0;i<nfsu1_port_lang_count();i++){
@@ -414,11 +772,14 @@ index 04dc96a..c03f700 100644
  #ifdef NFSU2_VULKAN
      fprintf(f, "fxaa=%d\naniso=%d\nsquare=%d\n", s_fxaa, s_aniso_lvl[s_aniso_idx], s_square);
 +    if (s_fps_saved)
-+        fprintf(f, "fps=%d\n", fps_cap_30() ? 30 : 60);
++        fprintf(f, "fps=%d\n", fps_wanted());
 +    fprintf(f, "overlay=%d\nmenu_pause=%d\nmenu_seen=%d\n", nfsu1_port_overlay, s_port_pause,
 +            nfsu1_port_menu_seen);
  #endif
      fclose(f);
++#ifdef NFSU1_PS5
++    chmod(NFSU1_OPTIONS_FILE, 0666);    /* replaceable by PS5Upload or FTP, as the saves */
++#endif
  }
  
 -/* Our texts in guest memory, each copied once. */
@@ -447,15 +808,31 @@ index 04dc96a..c03f700 100644
 -        pool = xbox_ContiguousAlloc(0x400u, 16);
 -        if (!pool)
 -            return 0;
++/* Frame Rate's values, slowest first: 120 only on a 119.88 Hz output. */
++static int fps_values(int *v)
++{
++    int n = 0;
++    v[n++] = 30;
++    v[n++] = 60;
++    if (fps_120_offered())
++        v[n++] = 120;
++    return n;
++}
++
 +int nfsu1_opt_steps(int id)
 +{
++    int fps[3];
 +    switch (id) {
++    case NFSU1_OPT_FPS: return fps_values(fps);
 +    case NFSU1_OPT_SCALE: return N_SCALE_STEPS;
 +    case NFSU1_OPT_ANISO: return 5;
 +    case NFSU1_OPT_LOD: return 6;
++    case NFSU1_OPT_BLUR: return 3;
 +#ifdef NFSU1_PS5
 +    case NFSU1_OPT_SPEAKER_TEST: return 10;
++    case NFSU1_OPT_VIBRATION: return 11;
 +#else
++    case NFSU1_OPT_VIBRATION: return 0;
 +    case NFSU1_OPT_TEXT_LANG: case NFSU1_OPT_VOICE_LANG: case NFSU1_OPT_MUSIC:
 +    case NFSU1_OPT_SPEAKERS: case NFSU1_OPT_SPEAKER_TEST: return 0;
 +#endif
@@ -475,15 +852,6 @@ index 04dc96a..c03f700 100644
 +int nfsu1_opt_get(int id)
  {
 -    uint32_t name = guest_str(object), str = guest_str(text);
--
--    if (!name || !str)
--        return;
--    PUSH32(esp, str);
--    PUSH32(esp, name);
--    PUSH32(esp, MEM32(screen + 0xCu));
--    PUSH32(esp, ROW_HANDLER_VA);
--    sub_000DD490();
--    esp += 12;
 +    switch (id) {
 +    case NFSU1_OPT_SCALE: return s_scale_idx;
 +    case NFSU1_OPT_FXAA: return s_fxaa;
@@ -491,7 +859,15 @@ index 04dc96a..c03f700 100644
 +    case NFSU1_OPT_SQUARE: return s_square;
 +    case NFSU1_OPT_REFLECTIONS: return s_refl;
 +    case NFSU1_OPT_LOD: return s_lod_idx;
-+    case NFSU1_OPT_FPS: return fps_cap_30();
++    case NFSU1_OPT_BLUR: return s_blur;
++    case NFSU1_OPT_VIBRATION: return s_vib_idx;
++    case NFSU1_OPT_FPS: {
++        int fps[3], n = fps_values(fps), i;
++        for (i = 0; i < n; i++)
++            if (fps[i] == fps_now())
++                return i;
++        return 0;
++    }
 +    case NFSU1_OPT_OVERLAY: return nfsu1_port_overlay;
 +    case NFSU1_OPT_PAUSE: return s_port_pause;
 +#ifdef NFSU1_PS5
@@ -502,23 +878,20 @@ index 04dc96a..c03f700 100644
 +#endif
 +    }
 +    return 0;
- }
++}
  
--static const char *const s_name_obj[] = {
--    "OptionName_3", "OptionName_4", "OptionName_5", "OptionName_6", "OptionName_7",
--};
--static const char *const s_data_obj[] = {
--    "OptionData_3", "OptionData_4", "OptionData_5", "OptionData_6", "OptionData_7",
--};
--
--static void opt_row_text(uint32_t screen, int i)
+-    if (!name || !str)
 +void nfsu1_opt_set(int id, int v)
- {
--    fe_set_text(screen, s_name_obj[i], s_rows[i].label);
--    fe_set_text(screen, s_data_obj[i], s_rows[i].texts[*s_rows[i].value]);
++{
 +    int n = nfsu1_opt_steps(id);
 +    if (n <= 0)
-+        return;
+         return;
+-    PUSH32(esp, str);
+-    PUSH32(esp, name);
+-    PUSH32(esp, MEM32(screen + 0xCu));
+-    PUSH32(esp, ROW_HANDLER_VA);
+-    sub_000DD490();
+-    esp += 12;
 +    v = v < 0 ? 0 : v >= n ? n - 1 : v;
 +    switch (id) {
 +    case NFSU1_OPT_SCALE: s_scale_idx = v; scale_changed(); break;
@@ -527,7 +900,16 @@ index 04dc96a..c03f700 100644
 +    case NFSU1_OPT_SQUARE: s_square = v; picture_changed(); break;
 +    case NFSU1_OPT_REFLECTIONS: s_refl = v; refl_changed(); break;
 +    case NFSU1_OPT_LOD: s_lod_idx = v; lod_changed(); break;
-+    case NFSU1_OPT_FPS: s_fps30 = v; s_fps_saved = 1; break;
++    case NFSU1_OPT_BLUR: s_blur = v; blur_changed(); break;
++    case NFSU1_OPT_VIBRATION: s_vib_idx = v; vib_changed(); break;
++    case NFSU1_OPT_FPS: {
++        int fps[3], n = fps_values(fps);
++        if (v >= 0 && v < n) {
++            s_fps = fps[v];
++            s_fps_saved = 1;
++        }
++        break;
++    }
 +    case NFSU1_OPT_OVERLAY: nfsu1_port_overlay = v; break;
 +    case NFSU1_OPT_PAUSE: s_port_pause = v; break;
 +#ifdef NFSU1_PS5
@@ -540,32 +922,17 @@ index 04dc96a..c03f700 100644
 +    }
  }
  
--/* Camera setup (thiscall, ecx = options screen, ret): the game's two rows,
-- * then ours. */
--void sub_000C2A70(void)
+-static const char *const s_name_obj[] = {
+-    "OptionName_3", "OptionName_4", "OptionName_5", "OptionName_6", "OptionName_7",
+-};
+-static const char *const s_data_obj[] = {
+-    "OptionData_3", "OptionData_4", "OptionData_5", "OptionData_6", "OptionData_7",
+-};
 +/* lang.txt has the names in the text tables' Windows-1251, the menu draws UTF-8. */
 +const char *nfsu1_opt_lang_text(int id, int v, char *buf, unsigned cap)
- {
--    uint32_t screen = ecx;
--    int i;
++{
 +    unsigned n = 0;
- 
--    sub_000C2A70_gen();
--    for (i = 0; i < N_ROWS; i++) {
--        int row = ROW_FIRST + i;
--        PUSH32(esp, 0);                     /* no select button */
--        PUSH32(esp, 1);                     /* value text */
--        PUSH32(esp, (uint32_t)row);
--        ecx = screen;
--        PUSH32(esp, 0x000C2A99u);
--        sub_000C1D30();                     /* thiscall, pops its 3 */
--        PUSH32(esp, 0);                     /* arrows, not -/+ */
--        PUSH32(esp, (uint32_t)row);
--        ecx = screen;
--        PUSH32(esp, 0x000C2AB3u);
--        sub_000C1E10();                     /* thiscall, pops its 2 */
--        MEM32(screen + 0x3Cu + 4u * (uint32_t)(row - 1)) = ROW_HANDLER_VA + (uint32_t)i;
--        opt_row_text(screen, i);
++
 +    if (!cap)
 +        return "";
 +    buf[0] = 0;
@@ -593,17 +960,81 @@ index 04dc96a..c03f700 100644
 +        buf[n] = 0;
 +        if ((v != 0) != nfsu1_port_lang_active(kind) && n + 18 < cap)
 +            memcpy(buf + n, " (after restart)", 17);
-     }
++    }
 +#else
 +    (void)id; (void)v; (void)n;
 +#endif
 +    return buf;
++}
+ 
+-static void opt_row_text(uint32_t screen, int i)
++int nfsu1_opt_shown(int id)
+ {
+-    fe_set_text(screen, s_name_obj[i], s_rows[i].label);
+-    fe_set_text(screen, s_data_obj[i], s_rows[i].texts[*s_rows[i].value]);
++    switch (id) {
++#ifdef NFSU1_PS5
++    case NFSU1_OPT_TEXT_LANG: case NFSU1_OPT_VOICE_LANG: case NFSU1_OPT_MUSIC:
++        return nfsu1_port_lang_name(opt_lang_kind(id), 0)[0] != 0;
++#endif
++    default: return nfsu1_opt_steps(id) > 0;
++    }
+ }
+ 
+-/* Camera setup (thiscall, ecx = options screen, ret): the game's two rows,
+- * then ours. */
+-void sub_000C2A70(void)
++void nfsu1_opt_save(void)
+ {
+-    uint32_t screen = ecx;
+-    int i;
++    options_save();
++    options_log();
++}
++#endif
+ 
+-    sub_000C2A70_gen();
+-    for (i = 0; i < N_ROWS; i++) {
+-        int row = ROW_FIRST + i;
+-        PUSH32(esp, 0);                     /* no select button */
+-        PUSH32(esp, 1);                     /* value text */
+-        PUSH32(esp, (uint32_t)row);
+-        ecx = screen;
+-        PUSH32(esp, 0x000C2A99u);
+-        sub_000C1D30();                     /* thiscall, pops its 3 */
+-        PUSH32(esp, 0);                     /* arrows, not -/+ */
+-        PUSH32(esp, (uint32_t)row);
+-        ecx = screen;
+-        PUSH32(esp, 0x000C2AB3u);
+-        sub_000C1E10();                     /* thiscall, pops its 2 */
+-        MEM32(screen + 0x3Cu + 4u * (uint32_t)(row - 1)) = ROW_HANDLER_VA + (uint32_t)i;
+-        opt_row_text(screen, i);
+-    }
++/* ── The gear, for a knock at each change (gear_pulse_ps5.c) ─────────
++ *
++ * The player car's rumble update (sub_000377B0, thiscall) starts the title's
++ * rumble effects through sub_00132270 (cdecl: effect, pad, intensity); its
++ * `this`, the car's simulation, is in esi across the call (return address
++ * 0x3782E). Its gear is at +0x3D8 (0 reverse, 1 first ...; console dumps,
++ * 2026-11-26). Also there: +0x88 the forward speed in m/s, +0x3E0 the
++ * engine speed in rpm (800 at idle, 6900 at the limiter).
++ * Read each race frame (sub_00016050) on the guest thread. The race's HUD is
++ * drawn by the front end's render too, so only the front end proper (game
++ * flow state not 6) forgets the car; at 120 fps the car updates every
++ * second frame. */
++volatile int nfsu1_car_gear = -1;
++volatile uint32_t nfsu1_race_frames;     /* stops when the race does */
++static uint32_t s_car_sim;
++
++static int guest_object(uint32_t p)
++{
++    return (p >= 0x00010000u && p < 0x04000000u) || (p >= 0x80000000u && p < 0x84000000u);
  }
  
 -/* Row input (thiscall, the message, ret 4), as sub_000C0C90: left/right
 - * step the value (wrapping), then the texts and the arrow sound. */
 -static void opt_row_input(int i)
-+int nfsu1_opt_shown(int id)
++static void race_feedback(void)
  {
 -    uint32_t screen = ecx, msg = MEM32(esp + 4);
 -    const OptRow *o = &s_rows[i];
@@ -625,14 +1056,14 @@ index 04dc96a..c03f700 100644
 -        PUSH32(esp, ROW_HANDLER_VA);
 -        sub_000DDD60();
 -        esp += 8;
-+    switch (id) {
-+#ifdef NFSU1_PS5
-+    case NFSU1_OPT_TEXT_LANG: case NFSU1_OPT_VOICE_LANG: case NFSU1_OPT_MUSIC:
-+        return nfsu1_port_lang_name(opt_lang_kind(id), 0)[0] != 0;
-+#endif
-+    default: return nfsu1_opt_steps(id) > 0;
++    uint32_t car = s_car_sim;
++    if (!guest_object(car)) {
++        nfsu1_car_gear = -1;
++        return;
      }
 -    esp += 8;
++    nfsu1_car_gear = (int)MEM32(car + 0x3D8);
++    nfsu1_race_frames++;
  }
  
 -static void opt_row_input_0(void) { opt_row_input(0); }
@@ -641,15 +1072,35 @@ index 04dc96a..c03f700 100644
 -static void opt_row_input_2(void) { opt_row_input(2); }
 -static void opt_row_input_3(void) { opt_row_input(3); }
 -static void opt_row_input_4(void) { opt_row_input(4); }
-+void nfsu1_opt_save(void)
+-#endif
++extern void sub_00132270_gen(void);
++void sub_00132270(void)
 +{
-+    options_save();
-+    options_log();
++    if (MEM32(esp) == 0x0003782Eu && guest_object(esi))
++        s_car_sim = esi;
++    sub_00132270_gen();
 +}
- #endif
  
  /* Race render (cdecl, no arguments): cube-face views off for the call. */
-@@ -1063,7 +1128,7 @@ void sub_0011BC20(void)
+ void sub_00016050(void)
+@@ -918,6 +1385,7 @@ void sub_00016050(void)
+     uint8_t keep[6];
+     int n;
+ 
++    race_feedback();
+     if (s_refl) {
+         sub_00016050_gen();
+         return;
+@@ -951,6 +1419,8 @@ static uint32_t s_menu_size_user;       /* bits the slider last stored */
+ void sub_00016460(void)
+ {
+     uint32_t v = MEM32(NFSU1_MENU_SIZE);
++    if (MEM32(NFSU1_GAMEFLOW_STATE) != 6)
++        s_car_sim = 0;                  /* out of the race: its car is gone (gear pulse) */
+     int previous = s_ui_aspect_active;
+     float f;
+ 
+@@ -1063,7 +1533,7 @@ void sub_0011BC20(void)
  #define MAIN_MSG_LOAD       0xFEDCBA03u     /* dialog B's Load */
  #define LOGIN_MSG_YES       0x12312300u
  #define LOGIN_STATE_LIST    0x000BD7E0u
@@ -658,7 +1109,7 @@ index 04dc96a..c03f700 100644
  
  enum { AL_OFF, AL_MAIN, AL_LIST, AL_CONFIRM };
  static int s_al_stage, s_al_checked;
-@@ -1074,7 +1139,7 @@ static char s_al_name[32];              /* newest save's profile */
+@@ -1074,7 +1544,7 @@ static char s_al_name[32];              /* newest save's profile */
   * many there are. */
  static int autoload_find_save(void)
  {
@@ -667,7 +1118,7 @@ index 04dc96a..c03f700 100644
      char dir[600], sub[700], path[800];
      struct dirent *u, *s, *f;
      DIR *du, *ds, *df;
-@@ -1089,7 +1154,7 @@ static int autoload_find_save(void)
+@@ -1089,7 +1559,7 @@ static int autoload_find_save(void)
      if (!(du = opendir(game)))
          return 0;
      while ((u = readdir(du))) {                 /* UDATA, any case */
@@ -676,7 +1127,7 @@ index 04dc96a..c03f700 100644
              continue;
          snprintf(dir, sizeof dir, "%s/%s/45410047", game, u->d_name);
          if (!(ds = opendir(dir)))
-@@ -1277,15 +1342,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
+@@ -1277,15 +1747,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
       * if (xbox_va == 0x000ABCDE) return fixed_sub_000ABCDE;
       */
  
@@ -823,7 +1274,7 @@ index c0c0548..c00dd55 100644
 +
 +BOOL xbox_ProtectGuestRange(PVOID,SIZE_T,DWORD,PDWORD);
 diff --git a/xboxrecomp/src/kernel/kernel_bridge.c b/xboxrecomp/src/kernel/kernel_bridge.c
-index fafc9c1..67fa6b8 100644
+index fafc9c1..0126d0c 100644
 --- a/xboxrecomp/src/kernel/kernel_bridge.c
 +++ b/xboxrecomp/src/kernel/kernel_bridge.c
 @@ -590,6 +590,9 @@ static int gil_enabled(void)
@@ -836,7 +1287,105 @@ index fafc9c1..67fa6b8 100644
          s_gil_on = !(e && *e == '0');
          if (s_gil_on)
              fprintf(stderr, "  [THREAD] guest code serialised under one lock (RECOMP_GIL)\n");
-@@ -3630,7 +3633,12 @@ static const char* bridge_get_xbox_path(uint32_t obj_attrs_va)
+@@ -625,7 +628,13 @@ int xbox_thread_holds_dispatch(void);     /* kernel_hal.c */
+  *     work is not audible.
+  * ISRs and DPCs are never pre-empted (t_gil_nopreempt), as before. */
+ static RECOMP_TLS int t_gil_main;
+-void xbox_gil_mark_main(void) { t_gil_main = 1; }
++extern void nfsu1_prof_register(const char *name) __attribute__((weak));   /* RECOMP_PROF (PS5) */
++void xbox_gil_mark_main(void)
++{
++    t_gil_main = 1;
++    if (nfsu1_prof_register)
++        nfsu1_prof_register("guest");
++}
+ 
+ static int gil_eager(void)
+ {
+@@ -678,6 +687,19 @@ static void gil_lock(void)
+     if (me != s_gil_serving && xbox_thread_holds_dispatch()) {
+         g_gil_contended = 1;
+     }
++    /* The frame-rate thread spins 80000 TSC ticks before it sleeps: the others
++     * hold the lock for tens of microseconds (an ISR, a DPC, an audio tick),
++     * and a condition-variable wake cost it more than that each time (main
++     * thread at 120 fps: 0.6-0.9 ms a frame waiting, 0.2 ms of it held). */
++#if defined(__x86_64__)
++    if (me != s_gil_serving && t_gil_main) {
++        uint64_t until = __builtin_ia32_rdtsc() + 80000;
++        LeaveCriticalSection(&s_gil_cs);
++        while (__atomic_load_n(&s_gil_serving, __ATOMIC_ACQUIRE) != me && __builtin_ia32_rdtsc() < until)
++            __builtin_ia32_pause();
++        EnterCriticalSection(&s_gil_cs);
++    }
++#endif
+     while (me != s_gil_serving)
+         if (!SleepConditionVariableCS(&s_gil_cv, &s_gil_cs, 1))
+             g_gil_contended = 1;           /* 1 ms and still waiting */
+@@ -2887,6 +2909,20 @@ static int kernel_raise_interrupt(uint32_t vector)
+  * flag), so frame times are not quantised to whole vblanks. */
+ #define VBLANK_PERIOD_US 16683                    /* 59.94 Hz */
+ 
++/* The period in use: 59.94 Hz unless the host's display refreshes faster
++ * (xbox_vblank_set_hz: a 119.88 Hz output takes 8342 us) or
++ * RECOMP_VBLANK_HZ says otherwise at the first tick. */
++static volatile LONG s_vb_period_us = VBLANK_PERIOD_US;
++
++void xbox_vblank_set_hz(double hz)
++{
++    if (hz >= 20.0 && hz <= 500.0) {
++        LONG us = (LONG)(1e6 / hz + 0.5);
++        if (InterlockedExchange(&s_vb_period_us, us) != us)
++            fprintf(stderr, "  [NV2A] vblank %.2f Hz (%ld us)\n", hz, (long)us);
++    }
++}
++
+ static long long vb_now_us(void)
+ {
+     static LARGE_INTEGER f;
+@@ -2938,19 +2974,24 @@ static DWORD kernel_vblank_wait_ms(void)
+ static void kernel_vblank_tick(void)
+ {
+     static int enabled = -1;
+-    long long now;
++    long long now, period;
+ 
+-    if (enabled < 0)
++    if (enabled < 0) {
++        const char *hz = getenv("RECOMP_VBLANK_HZ");
+         enabled = getenv("RECOMP_VBLANK") && strcmp(getenv("RECOMP_VBLANK"), "0");
++        if (hz && *hz)
++            xbox_vblank_set_hz(atof(hz));
++    }
+     if (!enabled)
+         return;
+ 
+     now = vb_now_us();
++    period = s_vb_period_us;
+     if (s_vsync_last_us && now - s_vsync_last_us < 100000) {
+         static int locked;
+         if (!InterlockedExchange(&s_vsync_pending, 0))
+             return;                               /* no vsync since the last one */
+-        s_vb_next_us = now + VBLANK_PERIOD_US;    /* the timer's fallback */
++        s_vb_next_us = now + period;              /* the timer's fallback */
+         if (!locked++)
+             fprintf(stderr, "  [NV2A] vblank locked to the display's vsync\n");
+     } else {
+@@ -2958,10 +2999,10 @@ static void kernel_vblank_tick(void)
+             s_vb_next_us = now;
+         if (now < s_vb_next_us)
+             return;
+-        if (now - s_vb_next_us > VBLANK_PERIOD_US / 2)
+-            s_vb_next_us = now + VBLANK_PERIOD_US;    /* far behind: restart here */
++        if (now - s_vb_next_us > period / 2)
++            s_vb_next_us = now + period;          /* far behind: restart here */
+         else
+-            s_vb_next_us += VBLANK_PERIOD_US;         /* on time: no drift */
++            s_vb_next_us += period;               /* on time: no drift */
+     }
+     InterlockedIncrement(&s_vb_count);
+ 
+@@ -3630,7 +3671,12 @@ static const char* bridge_get_xbox_path(uint32_t obj_attrs_va)
      if (!buf_va) return NULL;
      /* XDK directory searches pass a counted prefix of "directory\\*".
       * The byte after Length need not be NUL or part of the object name. */
@@ -850,7 +1399,7 @@ index fafc9c1..67fa6b8 100644
      uint16_t length=BRIDGE_MEM16(ansi_str_va);
      if(length>BRIDGE_MEM16(ansi_str_va+2)) return NULL;
      /* Length <= MaximumLength says the string is self-consistent; it does not
-@@ -8424,7 +8432,7 @@ static void bridge_NtProtectVirtualMemory(void)
+@@ -8424,7 +8470,7 @@ static void bridge_NtProtectVirtualMemory(void)
      uint32_t size    = size_ptr ? BRIDGE_MEM32(size_ptr) : 0;
      DWORD old = 0;
  
@@ -860,7 +1409,7 @@ index fafc9c1..67fa6b8 100644
              BRIDGE_MEM32(old_ptr) = (uint32_t)old;
          g_eax = 0;  /* STATUS_SUCCESS */
 diff --git a/xboxrecomp/src/kernel/kernel_file.c b/xboxrecomp/src/kernel/kernel_file.c
-index 03a2cae..dbfacea 100644
+index 03a2cae..c729dd8 100644
 --- a/xboxrecomp/src/kernel/kernel_file.c
 +++ b/xboxrecomp/src/kernel/kernel_file.c
 @@ -884,6 +884,24 @@ static int handle_stat(HANDLE h, int fd, struct stat *st)
@@ -888,7 +1437,7 @@ index 03a2cae..dbfacea 100644
  NTSTATUS __stdcall xbox_NtCreateFile(
      PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
      PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
-@@ -896,8 +914,7 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+@@ -896,16 +914,19 @@ NTSTATUS __stdcall xbox_NtCreateFile(
      if (!FileHandle || !ObjectAttributes)
          return STATUS_INVALID_PARAMETER;
  
@@ -898,7 +1447,37 @@ index 03a2cae..dbfacea 100644
          xbox_log(XBOX_LOG_ERROR, XBOX_LOG_FILE, "NtCreateFile: path translation failed");
          return STATUS_OBJECT_PATH_NOT_FOUND;
      }
-@@ -1046,8 +1063,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
+ 
+     int fd;
+     if (CreateOptions & XBOX_FILE_DIRECTORY_FILE) {
+-        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF)
+-            mkdir(host_path, 0755);   /* EEXIST is fine */
++        if (CreateDisposition == XBOX_FILE_CREATE || CreateDisposition == XBOX_FILE_OPEN_IF) {
++            mkdir(host_path, 0777);   /* EEXIST is fine */
++#if defined(NFSU1_PS5)
++            chmod(host_path, 0777);   /* see below */
++#endif
++        }
+ #if defined(__SWITCH__)
+         /* Horizon's filesystem layer cannot open() a directory. A
+          * directory handle only needs its path (enumeration uses opendir on
+@@ -924,7 +945,14 @@ NTSTATUS __stdcall xbox_NtCreateFile(
+         fd = open(host_path, O_RDONLY | O_DIRECTORY);
+ #endif
+     } else {
+-        fd = open(host_path, posix_open_flags(DesiredAccess, CreateDisposition), 0644);
++        int flags = posix_open_flags(DesiredAccess, CreateDisposition);
++        fd = open(host_path, flags, 0666);
++#if defined(NFSU1_PS5)
++        /* Writable for everyone, so tools running as another user (PS5Upload,
++         * FTP) can replace saves the title wrote; the title may not call umask(). */
++        if (fd >= 0 && (flags & O_CREAT))
++            chmod(host_path, 0666);
++#endif
+     }
+ 
+     if (fd < 0 && fd != XBOX_DIR_FD) {
+@@ -1046,8 +1074,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
  NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
  {
      char host_path[MAX_PATH];
@@ -908,7 +1487,7 @@ index 03a2cae..dbfacea 100644
          return STATUS_OBJECT_PATH_NOT_FOUND;
      XBOX_TRACE(XBOX_LOG_FILE, "NtDeleteFile: %s", host_path);
      if (unlink(host_path) == 0) return STATUS_SUCCESS;
-@@ -1242,8 +1258,7 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
+@@ -1242,8 +1269,7 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
  
      if (!FileInformation)
          return STATUS_INVALID_PARAMETER;
@@ -946,7 +1525,7 @@ index e49a219..81389cd 100644
  }
  
 diff --git a/xboxrecomp/src/kernel/kernel_path.c b/xboxrecomp/src/kernel/kernel_path.c
-index dcb9fa4..60ac813 100644
+index dcb9fa4..f957473 100644
 --- a/xboxrecomp/src/kernel/kernel_path.c
 +++ b/xboxrecomp/src/kernel/kernel_path.c
 @@ -22,6 +22,11 @@
@@ -975,7 +1554,29 @@ index dcb9fa4..60ac813 100644
      { "\\Device\\CdRom0\\",                   0, NULL,         NULL          },
      { "\\Device\\Harddisk0\\Partition1\\",    0, NULL,         NULL          },
      /* The rest of the disk. Partition 0 is the whole raw device, 2 holds
-@@ -602,7 +614,7 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
+@@ -532,13 +544,19 @@ static void mkdir_p(const char* path)
+     for (char* p = tmp + 1; *p; p++) {
+         if (*p == '/') {
+             *p = '\0';
+-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
++            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+                 xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "mkdir %s: %s", tmp, strerror(errno));
++#if defined(NFSU1_PS5)
++            chmod(tmp, 0777);
++#endif
+             *p = '/';
+         }
+     }
+-    if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
++    if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+         xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "mkdir %s: %s", tmp, strerror(errno));
++#if defined(NFSU1_PS5)
++    chmod(tmp, 0777);                   /* saves stay replaceable (kernel_file.c) */
++#endif
+ }
+ 
+ void xbox_path_init(const char* game_dir, const char* save_dir)
+@@ -602,7 +620,7 @@ void xbox_path_init(const char* game_dir, const char* save_dir)
              f = fopen(path, "ab");
              if (f)
                  fclose(f);
@@ -984,7 +1585,7 @@ index dcb9fa4..60ac813 100644
              continue;       /* exists; its size is reported from the table */
  #endif
              if (truncate(path, (off_t)(s_part_sectors[i] * 512ull)) != 0)
-@@ -697,6 +709,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
+@@ -697,6 +715,9 @@ BOOL xbox_translate_path(const char* xbox_path, xbox_host_char* host_path_buf, D
      /* The request as the title made it; the [FILE] line after the open pairs
       * with it, the same as on the Win32 backend. */
      fprintf(stderr, "  [PATH] %s\n", xbox_path);
@@ -994,7 +1595,7 @@ index dcb9fa4..60ac813 100644
  
      {
          int digit = xbox_partition_device_digit(xbox_path, 0);
-@@ -752,6 +767,9 @@ translate:
+@@ -752,6 +773,9 @@ translate:
                  host_path_buf[--n] = '\0';
          }
          fix_case(host_path_buf, strlen(base_dir));
@@ -1036,8 +1637,143 @@ index d92d72e..1dcec0a 100644
              if (Type) *Type = 4; /* REG_DWORD */
              if (ResultLength) *ResultLength = sizeof(ULONG);
          }
+diff --git a/xboxrecomp/src/kernel/nv2a_pb_exec.c b/xboxrecomp/src/kernel/nv2a_pb_exec.c
+index 0aba2f0..6dcc80d 100644
+--- a/xboxrecomp/src/kernel/nv2a_pb_exec.c
++++ b/xboxrecomp/src/kernel/nv2a_pb_exec.c
+@@ -593,6 +593,12 @@ static struct {
+     uint32_t prog_gen, const_gen;       /* content versions for back ends */
+ } s_vp = { .prog_gen = 1, .const_gen = 1 };
+ 
++/* Rows written since a back end last took them (RECOMP_VK_THREAD's queue
++ * sends only those instead of comparing all 192 constant rows each draw). */
++static uint32_t s_vp_cdirty[(VP_CONSTS + 31) / 32], s_vp_pdirty[(VP_SLOTS + 31) / 32];
++#define VP_MARK(bits, row) ((bits)[(row) >> 5] |= 1u << ((row) & 31))
++uint32_t *nv2a_pb_vp_dirty(int program) { return program ? s_vp_pdirty : s_vp_cdirty; }
++
+ typedef struct { float pos[4], d0[4], t0[4]; int ok; } VpOut;
+ 
+ /* Per-batch results by vertex index: a strip or an indexed mesh names most
+@@ -607,8 +613,10 @@ static int vp_method(uint32_t method, uint32_t param)
+ 
+     if (method >= NV097_SET_TRANSFORM_PROGRAM && method < NV097_SET_TRANSFORM_PROGRAM + 0x80) {
+         slot = (method - NV097_SET_TRANSFORM_PROGRAM) / 4;
+-        if (s_vp.prog_load < VP_SLOTS)
++        if (s_vp.prog_load < VP_SLOTS) {
+             s_vp.prog[s_vp.prog_load][slot % 4] = param;
++            VP_MARK(s_vp_pdirty, s_vp.prog_load);
++        }
+         if (slot % 4 == 3)
+             s_vp.prog_load++;
+         s_vp.gen++;
+@@ -617,8 +625,10 @@ static int vp_method(uint32_t method, uint32_t param)
+     }
+     if (method >= NV097_SET_TRANSFORM_CONSTANT && method < NV097_SET_TRANSFORM_CONSTANT + 0x80) {
+         slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4;
+-        if (s_vp.const_load < VP_CONSTS)
++        if (s_vp.const_load < VP_CONSTS) {
+             memcpy(&s_vp.c[s_vp.const_load][slot % 4], &param, 4);
++            VP_MARK(s_vp_cdirty, s_vp.const_load);
++        }
+         if (slot % 4 == 3)
+             s_vp.const_load++;
+         s_vp.gen++;
+@@ -792,6 +802,7 @@ static void vp_run(float v[16][4], VpOut *o)
+                 int ci = (int)addr + (vpf(t, 3, 1, 1) ? a0 : 0);
+                 if (ci >= 0 && ci < VP_CONSTS) {
+                     vp_write(s_vp.c[ci], omask, src);
++                    VP_MARK(s_vp_cdirty, ci);
+                     s_vp.const_gen++;
+                 }
+             }
+@@ -3216,11 +3227,14 @@ static void raw_batch(void)
+     uint32_t lo = 0xFFFFFFFFu, hi = 0, i, a, nv;
+     uint16_t present = 0, direct = 0;
+ 
++    const uint32_t nidx = s_gpu.idx_count;     /* locals: s_gpu aliases the array */
++    const uint32_t *gidx = s_gpu.idx;
++
+     attr_const_init();
+ 
+-    for (i = 0; i < s_gpu.idx_count; i++) {
+-        if (s_gpu.idx[i] < lo) lo = s_gpu.idx[i];
+-        if (s_gpu.idx[i] > hi) hi = s_gpu.idx[i];
++    for (i = 0; i < nidx; i++) {
++        if (gidx[i] < lo) lo = gidx[i];
++        if (gidx[i] > hi) hi = gidx[i];
+     }
+     nv = hi - lo + 1;
+     if (nv > 1u << 20)
+@@ -3271,8 +3285,12 @@ static void raw_batch(void)
+             }
+         }
+     }
+-    for (i = 0; i < s_gpu.idx_count; i++)
+-        s_raw_idx[i] = s_gpu.idx[i] - lo;
++    {
++        uint32_t *__restrict out = s_raw_idx;
++        const uint32_t *__restrict in = gidx;
++        for (i = 0; i < nidx; i++)
++            out[i] = in[i] - lo;
++    }
+ 
+     rb.prim = s_gpu.prim;
+     rb.vertex_count = nv;
+@@ -4520,27 +4538,41 @@ uint32_t nv2a_pb_exec_run(uint32_t subch, uint32_t method, int noninc,
+             s_reg[w] = p[count - 1];
+             s_reg_dirty[w >> 4] = 1;
+         }
+-        if (s_gpu.prim)
+-            for (i = 0; i < count && s_gpu.idx_count + 2 <= NV_MAX_INDICES; i++) {
+-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] & 0xFFFF);
+-                s_gpu.idx[s_gpu.idx_count++] = (uint16_t)(p[i] >> 16);
++        if (s_gpu.prim) {
++            /* The count in a local: through s_gpu it was reloaded and stored
++             * for every index (it shares the struct with the array). */
++            uint32_t n = s_gpu.idx_count, k = n + 2 <= NV_MAX_INDICES ? (NV_MAX_INDICES - n) / 2 : 0;
++            uint32_t *__restrict dst = &s_gpu.idx[n];
++            const uint32_t *__restrict src = p;
++            if (k > count)
++                k = count;
++            for (i = 0; i < k; i++) {
++                dst[2 * i] = src[i] & 0xFFFF;
++                dst[2 * i + 1] = src[i] >> 16;
+             }
++            s_gpu.idx_count = n + 2 * k;
++        }
+         return count;
+     }
+     if (!noninc && method >= NV097_SET_TRANSFORM_CONSTANT
+         && method + count * 4 <= NV097_SET_TRANSFORM_CONSTANT + 0x80) {
+-        uint32_t slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4;
+-        for (i = 0; i < count; i++, slot++) {
+-            uint32_t w = (method / 4) + i;
++        uint32_t slot = (method - NV097_SET_TRANSFORM_CONSTANT) / 4, w = method / 4;
++        uint32_t load = s_vp.const_load;          /* a local: see the indices */
++        for (i = 0; i < count; i++, slot++, w++) {
+             if (s_reg[w] != p[i]) {
+                 s_reg[w] = p[i];
+                 s_reg_dirty[w >> 4] = 1;
+             }
+-            if (s_vp.const_load < VP_CONSTS)
+-                memcpy(&s_vp.c[s_vp.const_load][slot % 4], &p[i], 4);
+-            if (slot % 4 == 3)
+-                s_vp.const_load++;
++            if (load < VP_CONSTS)
++                memcpy(&s_vp.c[load][slot % 4], &p[i], 4);
++            if (slot % 4 == 3 || i + 1 == count) {
++                if (load < VP_CONSTS)
++                    VP_MARK(s_vp_cdirty, load);
++                if (slot % 4 == 3)
++                    load++;
++            }
+         }
++        s_vp.const_load = load;
+         s_vp.gen++;
+         s_vp.const_gen++;
+         return count;
 diff --git a/xboxrecomp/src/kernel/xbox_memory_layout.c b/xboxrecomp/src/kernel/xbox_memory_layout.c
-index 8cbe820..fa08f52 100644
+index 8cbe820..a67c86c 100644
 --- a/xboxrecomp/src/kernel/xbox_memory_layout.c
 +++ b/xboxrecomp/src/kernel/xbox_memory_layout.c
 @@ -80,6 +80,7 @@ static void *g_mirror_views[XBOX_NUM_MIRRORS] = {0};
@@ -1048,7 +1784,17 @@ index 8cbe820..fa08f52 100644
  static size_t g_span_size = 0;
  static void *g_tiled_view = NULL;
  
-@@ -2200,10 +2201,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -1228,6 +1229,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
+ {
+     extern void xbox_nx_pin_executor(void);   /* win32_compat.c: core 1 (Switch) */
+     volatile uint32_t *regs = (volatile uint32_t *)param;
++    extern void nfsu1_prof_register(const char *name) __attribute__((weak));   /* RECOMP_PROF (PS5) */
++    if (nfsu1_prof_register)
++        nfsu1_prof_register("exec");
+     xbox_nx_pin_executor();
+     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+         nv2a_ack_flags(regs);
+@@ -2200,10 +2204,10 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          /* Reserve base + mirrors as one range, and map the base at its head.
           * VirtualFree releases just the slice about to be used, so each view
           * replaces our own reservation rather than racing for free space. */
@@ -1061,7 +1807,7 @@ index 8cbe820..fa08f52 100644
              g_memory_base = MapViewOfFileEx(g_mapping_handle,
                                              FILE_MAP_ALL_ACCESS, 0, 0,
                                              g_memory_size, g_span_base);
-@@ -2215,7 +2216,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2215,7 +2219,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          }
  
          const size_t n_bases = sizeof(try_bases) / sizeof(try_bases[0]);
@@ -1070,7 +1816,7 @@ index 8cbe820..fa08f52 100644
              LPVOID hint = try_bases[i] ? (LPVOID)try_bases[i] : NULL;
              g_memory_base = MapViewOfFileEx(
                  g_mapping_handle,
-@@ -2981,7 +2982,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -2981,7 +2985,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
               * to use; outside it (no reservation) this is a no-op on an
               * address we never held. */
              if (g_span_base)
@@ -1079,7 +1825,7 @@ index 8cbe820..fa08f52 100644
              g_mirror_views[m] = MapViewOfFileEx(
                  g_mapping_handle,
                  FILE_MAP_ALL_ACCESS,
-@@ -3032,7 +3033,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
+@@ -3032,7 +3036,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          uint64_t extvma_size = (uint64_t)0x7FFE0000u - aliased_top;
          void *extvma_base = (void *)((uintptr_t)g_memory_base + (uintptr_t)aliased_top);
  
@@ -1089,7 +1835,7 @@ index 8cbe820..fa08f52 100644
              g_xbox_extvma_reserved = 1;
              fprintf(stderr, "  Extended VMA: reserved %llu MB at %p\n",
                      (unsigned long long)(extvma_size / (1024 * 1024)), extvma_base);
-@@ -3222,6 +3224,7 @@ void xbox_MemoryLayoutShutdown(void)
+@@ -3222,6 +3227,7 @@ void xbox_MemoryLayoutShutdown(void)
  
      /* Whatever is left of the base+mirrors reservation. The views carved out
       * of it are already unmapped above; this releases the range itself. */
@@ -1524,7 +2270,7 @@ index 0000000..67229f7
 +
 +#endif
 diff --git a/xboxrecomp/src/nv2a_vk/nv2a_vk.c b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
-index 773dd12..37ab365 100644
+index 773dd12..0b39a4a 100644
 --- a/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 +++ b/xboxrecomp/src/nv2a_vk/nv2a_vk.c
 @@ -29,7 +29,7 @@
@@ -1579,7 +2325,59 @@ index 773dd12..37ab365 100644
  
  extern ptrdiff_t xbox_GetMemoryOffset(void);
  
-@@ -129,6 +141,14 @@ static VkExtent2D     s_sc_extent;
+@@ -88,11 +100,51 @@ static const Nv2aRawBatch *s_batch;
+ /* Hitch accounting, as in nv2a_gl. */
+ static uint32_t s_hz_progs, s_hz_texs, s_hz_draws;
+ static uint64_t s_hz_prog_ns, s_hz_tex_ns, s_hz_tex_bytes;
++/* Around every program lookup and texture bind (several times a draw): TSC
++ * ticks on the PS5, turned into ns by hz_tick_ns() when a hitch is printed
++ * (clock_gettime is a system call there, and the runtime's fast clock is
++ * shared by every thread). Elsewhere ns. */
++static uint64_t hz_ticks(void)
++{
++#if defined(NFSU1_PS5)
++    return __builtin_ia32_rdtsc();
++#else
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++#endif
++}
++static uint64_t hz_now(void);
++/* ns per hz_ticks() tick: measured from the first call on, 1 off the PS5. */
++static double hz_tick_ns(void)
++{
++#if defined(NFSU1_PS5)
++    static uint64_t t0, n0;
++    static double k = 0.625;                    /* a 1.6 GHz guess until measured */
++    uint64_t t = __builtin_ia32_rdtsc(), n = hz_now();
++    if (!t0) {
++        t0 = t;
++        n0 = n;
++    } else if (n - n0 > 100000000ull && t > t0) {
++        k = (double)(n - n0) / (double)(t - t0);
++    }
++    return k;
++#else
++    return 1.0;
++#endif
++}
++
++/* Nanoseconds, for everything that is not per draw. */
+ static uint64_t hz_now(void)
+ {
++#if defined(NFSU1_PS5)
++    extern uint64_t recomp_now_ns(void);   /* win32_compat.c */
++    return recomp_now_ns();
++#else
+     struct timespec ts;
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++#endif
+ }
+ 
+ /* ── Device ───────────────────────────────────────────────────────── */
+@@ -129,6 +181,35 @@ static VkExtent2D     s_sc_extent;
  static uint32_t       s_sc_count;
  static VkImage        s_sc_images[8];
  static VkImageView    s_sc_views[8];
@@ -1589,12 +2387,33 @@ index 773dd12..37ab365 100644
 + * menu that holds the title (see vk_flip). */
 +extern void nv2a_host_overlay(const Nv2aVkOverlay *o) __attribute__((weak));
 +extern int nv2a_host_paused(void) __attribute__((weak));
++/* The display's refresh in millihertz, 0 until the surface is made. On the
++ * PS5, VideoOut lists 119.88 Hz modes only when the output runs at 119.88 Hz
++ * (from its open on: the title declares it, the console's output takes it
++ * and the display then refreshes at it), whatever mode SDL picks. */
++uint32_t nv2a_vk_display_mhz;
++static void display_refresh(void)
++{
++    VkDisplayPropertiesKHR dp[2];
++    VkDisplayModePropertiesKHR mp[16];
++    uint32_t nd = 2, nm = 16, i, best = 0;
++    if (vkGetPhysicalDeviceDisplayPropertiesKHR(s_pd, &nd, dp) < 0 || !nd
++            || vkGetDisplayModePropertiesKHR(s_pd, dp[0].display, &nm, mp) < 0)
++        return;
++    for (i = 0; i < nm; i++)
++        if (mp[i].parameters.refreshRate > best)
++            best = mp[i].parameters.refreshRate;
++    nv2a_vk_display_mhz = best;
++    fprintf(stderr, "  [VK] display refreshes at %.3f Hz\n", best / 1000.0);
++}
 +#endif
 +volatile unsigned nv2a_vk_frame_draws;
++/* The title runs above 60 fps (recomp_manual.c, the port's 120 fps). */
++int nv2a_vk_fps_high;
  static int            s_headless;
  #if !defined(__SWITCH__)
  static SDL_Window    *s_win;
-@@ -310,6 +330,10 @@ typedef struct {
+@@ -310,6 +391,10 @@ typedef struct {
   * RECOMP_VK_SQUARE=0 off; RECOMP_GL_SCALE_X overrides it. */
  static double   s_scale = 1.0, s_scale_x = 1.0, s_xratio = 1.0;
  static int      s_square, s_square_env;
@@ -1605,7 +2424,7 @@ index 773dd12..37ab365 100644
  
  /* Picture options set at run time (NFSU2: Options -> Video), read by the
   * renderer: FXAA on/off (at every present), anisotropic level 1..16 (per
-@@ -326,11 +350,55 @@ static uint32_t s_max_size = 4096;
+@@ -326,11 +411,55 @@ static uint32_t s_max_size = 4096;
   * flip (rescale_surfaces). */
  volatile int nv2a_vk_scale_pct;
  
@@ -1665,8 +2484,47 @@ index 773dd12..37ab365 100644
      if (w * kx > (double)s_max_size)
          kx = (double)s_max_size / w;
      if (h * ky > (double)s_max_size)
-@@ -745,7 +813,7 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
+@@ -698,13 +827,32 @@ static int make_image(uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags us
+ 
+ /* ── Surfaces ─────────────────────────────────────────────────────── */
+ 
++/* Every texture bind asks whether its address is a render target, and most
++ * are not: a scan of all surfaces each time. Answers are kept by address,
++ * hits checked on use, misses until a surface is made (s_surf_gen). */
++static uint32_t s_surf_gen = 1;
++static struct { uint32_t va, gen; VkSurf *s; } s_surf_memo[64];
++
+ static VkSurf *surf_find(uint32_t va)
+ {
++    uint32_t k = ((va >> 6) ^ (va >> 14)) & 63;
++    VkSurf *found = NULL;
+     int i;
++    if (s_surf_memo[k].gen == s_surf_gen && s_surf_memo[k].va == va) {
++        found = s_surf_memo[k].s;
++        if (!found || (found->image && found->va == va))
++            return found;
++        found = NULL;
++    }
+     for (i = 0; i < VK_MAX_SURF; i++)
+-        if (s_surf[i].image && s_surf[i].va == va)
+-            return &s_surf[i];
+-    return NULL;
++        if (s_surf[i].image && s_surf[i].va == va) {
++            found = &s_surf[i];
++            break;
++        }
++    s_surf_memo[k].va = va;
++    s_surf_memo[k].gen = s_surf_gen;
++    s_surf_memo[k].s = found;
++    return found;
+ }
+ 
+ static void clear_image_color(VkImage img, float r, float g, float b, float a)
+@@ -743,9 +891,10 @@ static VkSurf *surf_get(uint32_t va, uint32_t w, uint32_t h, uint32_t aa_sx, uin
+         garbage_add(s->image, s->view, s->mem);
+     }
      memset(s, 0, sizeof *s);
++    s_surf_gen++;                               /* surf_find's misses are stale */
      s->va = va; s->w = w; s->h = h; s->used = s_frame;
      s->aa_sx = aa_sx; s->aa_sy = aa_sy;
 -    stored_size(w, h, aa_sx, &s->pw, &s->ph);
@@ -1674,7 +2532,7 @@ index 773dd12..37ab365 100644
      if (!make_image(s->pw, s->ph, VK_FORMAT_B8G8R8A8_UNORM,
                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-@@ -781,7 +849,7 @@ static void rescale_surfaces(double k)
+@@ -781,7 +930,7 @@ static void rescale_surfaces(double k)
          uint32_t pw, ph;
          if (!s->image)
              continue;
@@ -1683,7 +2541,7 @@ index 773dd12..37ab365 100644
          if (pw == s->pw && ph == s->ph)
              continue;
          if (!make_image(pw, ph, VK_FORMAT_B8G8R8A8_UNORM,
-@@ -884,11 +952,13 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
+@@ -884,13 +1033,26 @@ static VkSurf *target(const Nv2aSurface *sf, uint32_t zeta_va, VkDepthBuf **dout
  
  typedef struct {
      uint32_t va, color, w, h, pitch, hash, bytes;
@@ -1693,11 +2551,24 @@ index 773dd12..37ab365 100644
      VkImage image; VkImageView view; VkDeviceMemory mem;
      VkFormat fmt;
      uint32_t used, checked;
++    uint32_t changed;           /* frame its contents were last (re)loaded */
 +    const void *hd;             /* the HD record the image holds, or NULL */
  } VkTex;
  
++/* A texture whose bytes have not changed for TEX_STABLE frames is hashed
++ * again every TEX_RECHECK frames instead of at its first use in each frame
++ * (staggered by slot): the sampled hash reads 256 words strewn across the
++ * texture, a cache and TLB miss each, for every texture every frame. A change
++ * to such a texture shows TEX_RECHECK - 1 frames late at most; textures that
++ * changed lately (movie frames, composited car skins) are checked every
++ * frame as before. */
++#define TEX_STABLE  120
++#define TEX_RECHECK 8
++
  /* RECOMP_VK_MIPS=0: level 0 only (the old look). RECOMP_VK_ANISO=<n>:
-@@ -1078,8 +1148,8 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
+  * anisotropic filtering of mipmapped textures, 1 = off (default 16, capped
+  * by the device). RECOMP_VK_LOD_BIAS: their mip bias. */
+@@ -1078,8 +1240,8 @@ static void tex_copy_from_ring(VkTex *t, VkDeviceSize at, uint32_t row_texels,
      rg.imageSubresource.mipLevel = level;
      rg.imageSubresource.baseArrayLayer = layer;
      rg.imageSubresource.layerCount = 1;
@@ -1708,7 +2579,7 @@ index 773dd12..37ab365 100644
      rg.imageExtent.depth = 1;
      vkCmdCopyBufferToImage(s_cb, s_f->ring, t->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
  }
-@@ -1221,6 +1291,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1221,6 +1383,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
      uint32_t i, hash;
      VkFormat fmt = VK_FORMAT_B8G8R8A8_UNORM;
      uint32_t layers = face ? 6 : 1, f, size;
@@ -1724,7 +2595,36 @@ index 773dd12..37ab365 100644
  
      for (i = s_tex_head[tex_bucket(va, color, w, h)]; i; i = s_tex_next[i - 1]) {
          VkTex *c = &s_tex[i - 1];
-@@ -1251,7 +1330,51 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1234,6 +1405,19 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+         t->used = s_frame;
+         return t->view;
+     }
++    if (t && s_frame - t->changed > TEX_STABLE && ((s_frame + (uint32_t)(t - s_tex)) % TEX_RECHECK)) {
++        t->used = t->checked = s_frame;
++        return t->view;
++    }
++    /* At 120 fps a P8 image the title rewrote last frame (the race's
++     * game-drawn pair is rewritten every frame) is decoded every second
++     * frame: its pixels then change at 60 Hz, as the title drew them at
++     * the Xbox's 30 or 60. The decode is the recording thread's costliest
++     * part of a heavy race frame. */
++    if (t && nv2a_vk_fps_high && color == 0x0B && !t->hd && t->changed == s_frame - 1) {
++        t->used = t->checked = s_frame;
++        return t->view;
++    }
+     hash = bytes_hash(va, face ? face * 6 : tex_bytes(color, w, h, pitch));
+     if (color == 0x0B)
+         hash ^= bytes_hash(s_palette_va, 1024) * 31u;
+@@ -1241,6 +1425,8 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+         t->used = t->checked = s_frame;
+         return t->view;
+     }
++    uint64_t hz_t0 = hz_ticks();                /* ticks until the hitch line */
++#define TEX_RETURN(v) do { s_hz_tex_ns += hz_ticks() - hz_t0; return (v); } while (0)
+     if (s_tex_changes < 0) {
+         const char *e = getenv("RECOMP_TEX_CHANGES");
+         s_tex_changes = e && atoi(e) > 0;
+@@ -1251,7 +1437,51 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
      if (s_have_bc && color == 0x0C) fmt = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
      if (s_have_bc && color == 0x0E) fmt = VK_FORMAT_BC2_UNORM_BLOCK;
      if (s_have_bc && color == 0x0F) fmt = VK_FORMAT_BC3_UNORM_BLOCK;
@@ -1743,7 +2643,7 @@ index 773dd12..37ab365 100644
 +            /* Same replacement: the hash also covers bytes past the texture
 +             * (P8: w*h*4) and only those changed - the image stands. */
 +            t->hash=hash; t->used=t->checked=s_frame;
-+            return t->view;
++            TEX_RETURN(t->view);
 +        }
 +        if (hd && (hd_pixels=nfsu1_hd_load(hd,&hdi))!=NULL && hdi.color && !s_have_bc) {
 +            free(hd_pixels);            /* BC pack without BC sampling: keep the title's */
@@ -1777,7 +2677,7 @@ index 773dd12..37ab365 100644
          tex_free(t);
          t = NULL;
      }
-@@ -1266,13 +1389,15 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+@@ -1266,14 +1496,16 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
              tex_free(t);
          t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch; t->fmt = fmt;
          t->face = face; t->levels = levels;
@@ -1790,23 +2690,27 @@ index 773dd12..37ab365 100644
                             VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                             VK_IMAGE_ASPECT_COLOR_BIT, &t->image, &t->view, &t->mem)) {
              memset(t, 0, sizeof *t);
+-            return face ? s_dummy_cube_view : s_dummy_view;
 +            free(hd_pixels);
-             return face ? s_dummy_cube_view : s_dummy_view;
++            TEX_RETURN(face ? s_dummy_cube_view : s_dummy_view);
          }
          tex_index_add(t);
-@@ -1281,14 +1406,37 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+         if (s_trace)
+@@ -1281,17 +1513,41 @@ static VkImageView tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
                   face ? " cube" : "");
      }
      t->hash = hash;
-+    t->hd = hd_hit;
-     t->used = t->checked = s_frame;
- 
+-    t->used = t->checked = s_frame;
+-
 -    for (f = 0; f < layers; f++)
 -        tex_fill(t, va + f * face, f);
 -    if (fmt == VK_FORMAT_B8G8R8A8_UNORM && levels > 1)
 -        gen_mips(t->image, w, h, levels, layers);
 -    size = fmt != VK_FORMAT_B8G8R8A8_UNORM ? tex_bytes(color, w, h, 0) : w * h * 4;
 -    if (levels > 1)
++    t->hd = hd_hit;
++    t->used = t->checked = t->changed = s_frame;
++
 +#if defined(NFSU1_PS5)
 +    if (fmv_pixels) {
 +        tex_upload(t,fmv_pixels,fmv.bytes,0,0,0);
@@ -1837,8 +2741,13 @@ index 773dd12..37ab365 100644
 +    if (image_levels > 1)
          size += size / 3;                   /* the mip chain */
      tex_account(t, size * layers);
-     return t->view;
-@@ -1347,6 +1495,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
+-    return t->view;
++    TEX_RETURN(t->view);
++#undef TEX_RETURN
+ }
+ 
+ /* A cube map whose faces the title renders (race car reflections: six
+@@ -1347,6 +1603,8 @@ static VkImageView cube_from_surfaces(uint32_t va, uint32_t w, uint32_t h, uint3
              LOGE("cube 0x%08X %ux%u from surfaces (stored %u)\n", va, w, h, size);
      }
      c->used = s_frame;
@@ -1847,7 +2756,31 @@ index 773dd12..37ab365 100644
      for (f = 0; f < 6; f++) {
          VkSurf *sf = faces[f];
          VkImageBlit bl;
-@@ -1650,7 +1800,7 @@ static const char *cache_dir(void)
+@@ -1516,11 +1774,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
+                 levels = s_mips ? 2 : 1;            /* has a chain: see below */
+                 dyn_cube = 1;
+             } else {
+-                uint32_t texs = s_hz_texs;
+-                uint64_t t0 = hz_now();
+                 out->imageView = tex_get(va, color, w, h, 0, face, levels);
+-                if (s_hz_texs != texs)
+-                    s_hz_tex_ns += hz_now() - t0;
+             }
+         }
+     } else if (rt) {
+@@ -1528,11 +1782,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2], VkDescriptor
+         *sampled = rt;
+         rt_scale(w, h, rt->w, rt->h, rt->aa_sx, rt->aa_sy, scale);
+     } else {
+-        uint32_t texs = s_hz_texs;
+-        uint64_t t0 = hz_now();
+         out->imageView = tex_get(va, color, w, h, pitch, 0, levels);
+-        if (s_hz_texs != texs)
+-            s_hz_tex_ns += hz_now() - t0;
+     }
+     addr = regs[base + 2];
+     filter = regs[base + 5];
+@@ -1650,7 +1900,7 @@ static const char *cache_dir(void)
  #if defined(__SWITCH__)
      return "sdmc:/switch/nfsu1x/";
  #else
@@ -1856,7 +2789,7 @@ index 773dd12..37ab365 100644
  #endif
  }
  
-@@ -2387,6 +2537,7 @@ static int create_swapchain(void)
+@@ -2387,6 +2637,7 @@ static int create_swapchain(void)
          if (vkCreateImageView(s_dev, &vi, NULL, &s_sc_views[i]) != VK_SUCCESS)
              s_sc_views[i] = VK_NULL_HANDLE;     /* that image falls back to the blit */
      }
@@ -1864,7 +2797,7 @@ index 773dd12..37ab365 100644
      fprintf(stderr, "  [VK] swapchain %ux%u, %u images, format %d, present mode %d\n",
              s_sc_extent.width, s_sc_extent.height, s_sc_count, s_sc_format, mode);
      return 1;
-@@ -2433,30 +2584,29 @@ static int ready(void)
+@@ -2433,30 +2684,29 @@ static int ready(void)
  #else
      {
          const char *e = getenv("RECOMP_VK_HEADLESS");
@@ -1908,7 +2841,7 @@ index 773dd12..37ab365 100644
      }
      {
          const char *v = getenv("RECOMP_VK_VALIDATION");
-@@ -2495,7 +2645,7 @@ static int ready(void)
+@@ -2495,7 +2745,7 @@ static int ready(void)
          if (pp.limits.maxFramebufferHeight < m) m = pp.limits.maxFramebufferHeight;
          s_max_size = m ? m : 4096;
          if (!(k > 0.0)) k = 1.0;                    /* unset, 0 or garbage */
@@ -1917,7 +2850,7 @@ index 773dd12..37ab365 100644
          e = getenv("RECOMP_VK_SQUARE");
          s_square_env = xbox_video_widescreen() && !(e && *e == '0');
          e = getenv("RECOMP_GL_SCALE_X");
-@@ -2504,11 +2654,16 @@ static int ready(void)
+@@ -2504,11 +2754,16 @@ static int ready(void)
              s_square_env = 0;
          s_square = s_square_env && nv2a_vk_square;
          if (k > 0.0)
@@ -1935,7 +2868,7 @@ index 773dd12..37ab365 100644
      }
      if (s_ubo_align < 16) s_ubo_align = 16;
      vkGetPhysicalDeviceMemoryProperties(s_pd, &s_memprops);
-@@ -2530,6 +2685,7 @@ static int ready(void)
+@@ -2530,6 +2785,7 @@ static int ready(void)
              s_aniso = 1.0f;
          if (s_aniso > pp.limits.maxSamplerAnisotropy)
              s_aniso = pp.limits.maxSamplerAnisotropy;
@@ -1943,7 +2876,7 @@ index 773dd12..37ab365 100644
      }
      {
          VkFormatProperties fp;
-@@ -2565,9 +2721,9 @@ static int ready(void)
+@@ -2565,10 +2821,14 @@ static int ready(void)
          }
      }
  #else
@@ -1953,9 +2886,14 @@ index 773dd12..37ab365 100644
 -        s_headless = 1;
 +        return 0;
      }
++#if defined(NFSU1_PS5)
++    if (!s_headless)
++        display_refresh();
++#endif
  #endif
  
-@@ -2613,8 +2769,8 @@ static int ready(void)
+     qci.queueFamilyIndex = s_qfam;
+@@ -2613,8 +2873,8 @@ static int ready(void)
  #undef GET
  
      if (!s_headless && !create_swapchain()) {
@@ -1966,7 +2904,129 @@ index 773dd12..37ab365 100644
      }
  
      {
-@@ -3435,6 +3591,8 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
+@@ -2785,7 +3045,17 @@ static void kick_submit(void)
+ 
+ /* ── Render state ─────────────────────────────────────────────────── */
+ 
+-static float byte_f(uint32_t v, int shift) { return (float)((v >> shift) & 0xFF) / 255.0f; }
++/* i / 255.0f for every byte: the uniforms take 72 of them a draw. */
++static float s_byte_f[256];
++static float byte_f(uint32_t v, int shift)
++{
++    if (!s_byte_f[255]) {
++        int i;
++        for (i = 0; i < 256; i++)
++            s_byte_f[i] = (float)i / 255.0f;
++    }
++    return s_byte_f[(v >> shift) & 0xFF];
++}
+ static void argb_vec4(uint32_t v, float out[4])
+ {
+     out[0] = byte_f(v, 16); out[1] = byte_f(v, 8);
+@@ -3116,9 +3386,27 @@ static int upload_vertices(const Nv2aRawBatch *b)
+             slot[np++] = a;
+     pack_at = bytes;
+     bytes += (VkDeviceSize)nv * np * 16;
+-    const_at = bytes;
+-    bytes += NV2A_RAW_ATTRS * 16;
+-    at = ring_alloc(bytes, 16, &map);
++    {
++        /* The absent attributes' values (attr_const) as last uploaded, while
++         * they and this frame's ring are the same: their bindings then keep
++         * their offsets and are not bound again (below). */
++        static VkDeviceSize last_const;
++        static uint32_t last_const_gen, last_const_ring;
++        if (b->attr_const_gen && b->attr_const_gen == last_const_gen && last_const_ring == s_ring_gen
++            && last_const + NV2A_RAW_ATTRS * 16 <= s_f->ring_off) {
++            const_at = last_const;
++        } else {
++            void *cmap;
++            const_at = ring_alloc(NV2A_RAW_ATTRS * 16, 16, &cmap);
++            if (!cmap)
++                return 0;
++            memcpy(cmap, b->attr_const, NV2A_RAW_ATTRS * 16);
++            last_const = const_at;
++            last_const_gen = b->attr_const_gen;
++            last_const_ring = s_ring_gen;
++        }
++    }
++    at = ring_alloc(bytes ? bytes : 16, 16, &map);
+     dst = (uint8_t *)map;
+     if (!dst)
+         return 0;
+@@ -3135,8 +3423,6 @@ static int upload_vertices(const Nv2aRawBatch *b)
+                     memcpy(o, b->attrs + ((size_t)v * NV2A_RAW_ATTRS + slot[i]) * 4, 16);
+             }
+     }
+-    memcpy(dst + const_at, b->attr_const, NV2A_RAW_ATTRS * 16);
+-
+     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+         memset(&bind[a], 0, sizeof bind[a]);
+         memset(&attr[a], 0, sizeof attr[a]);
+@@ -3161,7 +3447,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
+             /* Absent: the title's SET_VERTEX_DATA* value, stride 0. */
+             bind[a].stride = 0;
+             attr[a].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+-            offs[a] = at + const_at + a * 16;
++            offs[a] = const_at + a * 16;
+         }
+     }
+     {
+@@ -3179,12 +3465,32 @@ static int upload_vertices(const Nv2aRawBatch *b)
+             last_gen = s_cb_gen;
+         }
+     }
+-    /* Eight at a time: Mesa's common entry point copies the arrays through
+-     * STACK_ARRAY, which mallocs above 8 elements (~3.6% of the executor
+-     * on the console in malloc/free). */
+-    vkCmdBindVertexBuffers(s_cb, 0, NV2A_RAW_ATTRS / 2, bufs, offs);
+-    vkCmdBindVertexBuffers(s_cb, NV2A_RAW_ATTRS / 2, NV2A_RAW_ATTRS - NV2A_RAW_ATTRS / 2,
+-                           bufs + NV2A_RAW_ATTRS / 2, offs + NV2A_RAW_ATTRS / 2);
++    {
++        /* Only the bindings whose offset changed since the last draw in this
++         * command buffer (the ring is one buffer), in runs of at most eight:
++         * Mesa's common entry point copies the arrays through STACK_ARRAY,
++         * which mallocs above 8 elements (~3.6% of the executor on the
++         * console in malloc/free). Most draws have a few attributes; the
++         * absent ones keep theirs while attr_const does. */
++        static VkDeviceSize last_offs[NV2A_RAW_ATTRS];
++        static uint32_t last_offs_gen;
++        int fresh = last_offs_gen != s_cb_gen;
++        uint32_t first;
++        a = 0;
++        while (a < NV2A_RAW_ATTRS) {
++            if (!fresh && offs[a] == last_offs[a]) {
++                a++;
++                continue;
++            }
++            first = a;
++            while (a < NV2A_RAW_ATTRS && a - first < 8 && (fresh || offs[a] != last_offs[a])) {
++                last_offs[a] = offs[a];
++                a++;
++            }
++            vkCmdBindVertexBuffers(s_cb, first, a - first, bufs + first, offs + first);
++        }
++        last_offs_gen = s_cb_gen;
++    }
+     return 1;
+ }
+ 
+@@ -3262,6 +3568,14 @@ static int regs_changed(const uint32_t *r)
+     int changed = 0;
+ 
+     for (blk = 0; blk < 0x2000 / 64; blk++) {
++        uint64_t eight;
++        if (!(blk & 7)) {                       /* eight blocks at a time */
++            memcpy(&eight, dirty + blk, 8);
++            if (!eight) {
++                blk += 7;
++                continue;
++            }
++        }
+         if (!dirty[blk])
+             continue;
+         dirty[blk] = 0;
+@@ -3435,6 +3749,8 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
  
      if (!ready())
          return;
@@ -1975,7 +3035,36 @@ index 773dd12..37ab365 100644
      s_regs = r;
      s_batch = b;
      if (s_inst_on < 0) {
-@@ -3787,6 +3945,17 @@ static void dump_surface(VkSurf *s, const char *path)
+@@ -3467,11 +3783,11 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
+     psh_key(r, &pk);
+     {
+         uint32_t made = s_prog_made;
+-        uint64_t t0 = hz_now();
++        uint64_t t0 = hz_ticks();
+         p = prog_get(b, &pk);
+         if (s_prog_made != made) {
+             s_hz_progs += s_prog_made - made;
+-            s_hz_prog_ns += hz_now() - t0;
++            s_hz_prog_ns += hz_ticks() - t0;    /* ticks until the hitch line */
+         }
+     }
+     if (!p)
+@@ -3593,8 +3909,12 @@ static void vk_draw_raw(const Nv2aRawBatch *b)
+             iat = ring_alloc((VkDeviceSize)n * 2, 4, &map);
+             o = (uint16_t *)map;
+             if (!o) return;
+-            for (i = 0; i < n; i++)
+-                o[i] = (uint16_t)idx[i];
++            {   /* restrict: with -fno-strict-aliasing the loop was not vectorised */
++                uint16_t *__restrict d = o;
++                const uint32_t *__restrict src = idx;
++                for (i = 0; i < n; i++)
++                    d[i] = (uint16_t)src[i];
++            }
+             vkCmdBindIndexBuffer(s_cb, s_f->ring, iat, VK_INDEX_TYPE_UINT16);
+         } else {
+             iat = ring_alloc((VkDeviceSize)n * 4, 4, &map);
+@@ -3787,6 +4107,17 @@ static void dump_surface(VkSurf *s, const char *path)
      vkCmdCopyImageToBuffer(s_cb, s->image, VK_IMAGE_LAYOUT_GENERAL, buf, 1, &rg);
      flush_frame_wait();
      if (vkMapMemory(s_dev, mem, 0, bci.size, 0, &ptr) == VK_SUCCESS) {
@@ -1993,7 +3082,7 @@ index 773dd12..37ab365 100644
          dump_bmp(path, (const uint8_t *)ptr, s->pw, s->ph);
          vkUnmapMemory(s_dev, mem);
      }
-@@ -3808,6 +3977,7 @@ static VkDescriptorSetLayout s_pp_dsl;
+@@ -3808,6 +4139,7 @@ static VkDescriptorSetLayout s_pp_dsl;
  static VkPipelineLayout      s_pp_layout;
  static VkSampler             s_pp_sampler;
  static struct { VkFormat fmt; VkPipeline pipe; } s_pp[2];
@@ -2001,7 +3090,7 @@ index 773dd12..37ab365 100644
  
  static const char s_pp_vs[] =
      "#version 450\n"
-@@ -3825,15 +3995,14 @@ static const char s_pp_fs[] =
+@@ -3825,15 +4157,14 @@ static const char s_pp_fs[] =
      "float Lat(vec2 uv) { return L(textureLod(src, uv, 0.0).rgb); }\n"
      "#define LO(x, y) L(textureLodOffset(src, uv, 0.0, ivec2(x, y)).rgb)\n"
      "const float Q[8] = float[](1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 4.0, 8.0);\n"
@@ -2019,7 +3108,7 @@ index 773dd12..37ab365 100644
      "    float lDL = LO(-1, 1), lUR = LO(1, -1), lUL = LO(-1, -1), lDR = LO(1, 1);\n"
      "    float lDU = lD + lU, lLR = lL + lR;\n"
      "    float lLc = lDL + lUL, lDc = lDL + lDR, lRc = lDR + lUR, lUc = lUR + lUL;\n"
-@@ -3872,7 +4041,18 @@ static const char s_pp_fs[] =
+@@ -3872,7 +4203,18 @@ static const char s_pp_fs[] =
      "    float s2 = (-2.0 * s1 + 3.0) * s1 * s1;\n"
      "    fin = max(fin, s2 * s2 * pc.rcp.z);\n"
      "    if (hor) uv.y += fin * step; else uv.x += fin * step;\n"
@@ -2039,7 +3128,7 @@ index 773dd12..37ab365 100644
      "}\n";
  
  static int fxaa_on(void)
-@@ -3910,6 +4090,8 @@ static VkPipeline pp_pipe(VkFormat fmt)
+@@ -3910,6 +4252,8 @@ static VkPipeline pp_pipe(VkFormat fmt)
      for (i = 0; i < 2; i++)
          if (s_pp[i].pipe && s_pp[i].fmt == fmt)
              return s_pp[i].pipe;
@@ -2048,7 +3137,7 @@ index 773dd12..37ab365 100644
      if (!s_pp_layout) {
          VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                             VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-@@ -3976,6 +4158,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
+@@ -3976,6 +4320,7 @@ static VkPipeline pp_pipe(VkFormat fmt)
      if (!pipe) {
          LOGE("FXAA pipeline failed; presenting with a blit\n");
          s_fxaa = 0;
@@ -2056,7 +3145,7 @@ index 773dd12..37ab365 100644
          return VK_NULL_HANDLE;
      }
      i = s_pp[0].pipe ? 1 : 0;
-@@ -4001,8 +4184,15 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+@@ -4001,8 +4346,15 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
      VkRect2D sc = { { dx, dy }, { (uint32_t)dw, (uint32_t)dh } };
      VkDescriptorImageInfo ii;
      VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -2074,7 +3163,7 @@ index 773dd12..37ab365 100644
      if (!pipe || !dview)
          return 0;
      end_rendering();
-@@ -4040,7 +4230,8 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+@@ -4040,7 +4392,8 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
      p_push_desc(s_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_pp_layout, 0, 1, &wr);
      pc[0] = (float)dx; pc[1] = (float)dy; pc[2] = (float)dw; pc[3] = (float)dh;
      pc[4] = 1.0f / (float)s->pw; pc[5] = 1.0f / (float)s->ph;
@@ -2084,7 +3173,7 @@ index 773dd12..37ab365 100644
      vkCmdPushConstants(s_cb, s_pp_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, pc);
      vkCmdDraw(s_cb, 3, 1, 0, 0);
      p_end_rendering(s_cb);
-@@ -4059,12 +4250,13 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
+@@ -4059,12 +4412,13 @@ static int present_fxaa(VkSurf *s, VkImage dst, VkImageView dview, VkFormat fmt,
  static void dump_fxaa(VkSurf *s, const char *path)
  {
      static VkSurf t;
@@ -2100,7 +3189,7 @@ index 773dd12..37ab365 100644
          if (!make_image(t.pw, t.ph, VK_FORMAT_B8G8R8A8_UNORM,
                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                          VK_IMAGE_ASPECT_COLOR_BIT, &t.image, &t.view, &t.mem)) {
-@@ -4086,16 +4278,15 @@ static void dump_fxaa(VkSurf *s, const char *path)
+@@ -4086,16 +4440,15 @@ static void dump_fxaa(VkSurf *s, const char *path)
   * elsewhere: the call is skipped. */
  extern void nv2a_host_frame_presented(uint32_t width, uint32_t height) __attribute__((weak));
  
@@ -2121,7 +3210,7 @@ index 773dd12..37ab365 100644
  
      if (!ready())
          return;
-@@ -4121,11 +4312,11 @@ static void vk_flip(void)
+@@ -4121,19 +4474,24 @@ static void vk_flip(void)
          }
      }
      {
@@ -2131,14 +3220,21 @@ index 773dd12..37ab365 100644
          uint64_t now = hz_now();
 -        if (last_ns) {
 -            uint64_t dt = now - last_ns;
++        if (!(s_frame & 63))
++            (void)hz_tick_ns();                 /* keeps the tick rate measured */
 +        if (s_hz_last) {
 +            uint64_t dt = now - s_hz_last;
              if (now - window_ns > 10000000000ull) { window_ns = now; lines = 0; }
-             if (dt > 50000000ull && lines++ < 30)
+-            if (dt > 50000000ull && lines++ < 30)
++            if (dt > 50000000ull && lines++ < 30) {
++                double k = hz_tick_ns();
                  fprintf(stderr, "[hitch] frame %u: %.0f ms -- %u programs compiled (%.0f ms),"
-@@ -4133,7 +4324,8 @@ static void vk_flip(void)
-                         s_hz_progs, s_hz_prog_ns / 1e6, s_hz_texs,
-                         s_hz_tex_bytes / 1048576.0, s_hz_tex_ns / 1e6, s_hz_draws);
+                         " %u textures %.1f MB (%.0f ms), %u draws\n", s_frame, dt / 1e6,
+-                        s_hz_progs, s_hz_prog_ns / 1e6, s_hz_texs,
+-                        s_hz_tex_bytes / 1048576.0, s_hz_tex_ns / 1e6, s_hz_draws);
++                        s_hz_progs, s_hz_prog_ns * k / 1e6, s_hz_texs,
++                        s_hz_tex_bytes / 1048576.0, s_hz_tex_ns * k / 1e6, s_hz_draws);
++            }
          }
 -        last_ns = now;
 +        s_hz_last = now;
@@ -2146,7 +3242,7 @@ index 773dd12..37ab365 100644
          s_hz_progs = s_hz_texs = s_hz_draws = 0;
          s_hz_prog_ns = s_hz_tex_ns = s_hz_tex_bytes = 0;
      }
-@@ -4178,23 +4370,33 @@ static void vk_flip(void)
+@@ -4178,23 +4536,33 @@ static void vk_flip(void)
      end_rendering();
      s_rt = NULL;
      s_rt_depth = NULL;
@@ -2183,7 +3279,7 @@ index 773dd12..37ab365 100644
              snprintf(path, sizeof path, "%s%05u_fxaa.bmp", dump_prefix, s_frame);
              barrier_all();
              dump_fxaa(s, path);
-@@ -4202,6 +4404,55 @@ static void vk_flip(void)
+@@ -4202,6 +4570,55 @@ static void vk_flip(void)
      }
      barrier_all();
  
@@ -2239,7 +3335,7 @@ index 773dd12..37ab365 100644
      VT("flip %u: surface %08X drew %d, acquiring\n", s_frame, s ? s->va : 0, s_drew_any);
      if (!s_headless) {
          VkResult rr = vkAcquireNextImageKHR(s_dev, s_swapchain, UINT64_MAX, s_f->acquired,
-@@ -4228,7 +4479,7 @@ static void vk_flip(void)
+@@ -4228,7 +4645,7 @@ static void vk_flip(void)
                  dw = (int)(lw * scale); dh = (int)(lh * scale);
                  dx = ((int)ww - dw) / 2; dy = ((int)wh - dh) / 2;
              }
@@ -2248,7 +3344,7 @@ index 773dd12..37ab365 100644
                  && present_fxaa(s, dst, s_sc_views[idx], s_sc_format, s_sc_extent, dx, dy, dw, dh,
                                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT))
-@@ -4272,6 +4523,16 @@ static void vk_flip(void)
+@@ -4272,6 +4689,16 @@ static void vk_flip(void)
              vkCmdPipelineBarrier(s_cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &b);
          presented:;
@@ -2265,7 +3361,298 @@ index 773dd12..37ab365 100644
          }
      }
      VT("flip %u: submit (image %d)\n", s_frame, have_image);
-@@ -4777,3 +5038,6 @@ void nv2a_vk_install(void)
+@@ -4410,16 +4837,37 @@ static void q_timed_wait(void)
+ }
+ 
+ /* Room for `size` contiguous bytes; returns where to write them. */
++/* The executor's write cursor: s_q_head plus the records not yet published.
++ * Draws go out eight at a time (each publish is a full barrier and moves
++ * s_q_head's cache line to the recording thread's core); clears and flips,
++ * and everything before the executor waits for room, go at once. */
++static size_t s_q_wr;
++static uint32_t s_q_unpub_n;
++
++static void q_publish_now(void)
++{
++    if (s_q_wr == s_q_head)
++        return;
++    __atomic_store_n(&s_q_head, s_q_wr, __ATOMIC_SEQ_CST);
++    s_q_unpub_n = 0;
++    if (__atomic_load_n(&s_q_consumer_waits, __ATOMIC_SEQ_CST)) {
++        pthread_mutex_lock(&s_q_lock);
++        pthread_cond_broadcast(&s_q_cv);
++        pthread_mutex_unlock(&s_q_lock);
++    }
++}
++
+ static uint8_t *q_reserve(size_t size)
+ {
+-    size_t off = s_q_head % Q_BYTES, need = size;
++    size_t off = s_q_wr % Q_BYTES, need = size;
+     if (off + size > Q_BYTES)
+         need += Q_BYTES - off;                  /* the wrap filler */
+-    if (Q_BYTES - (s_q_head - __atomic_load_n(&s_q_tail, __ATOMIC_ACQUIRE)) < need) {
++    if (Q_BYTES - (s_q_wr - __atomic_load_n(&s_q_tail, __ATOMIC_ACQUIRE)) < need) {
+         uint64_t t0 = hz_now();
++        q_publish_now();                        /* the recording thread drains what is here */
+         pthread_mutex_lock(&s_q_lock);
+         s_q_producer_waits = 1;
+-        while (Q_BYTES - (s_q_head - __atomic_load_n(&s_q_tail, __ATOMIC_ACQUIRE)) < need)
++        while (Q_BYTES - (s_q_wr - __atomic_load_n(&s_q_tail, __ATOMIC_ACQUIRE)) < need)
+             q_timed_wait();
+         s_q_producer_waits = 0;
+         pthread_mutex_unlock(&s_q_lock);
+@@ -4429,7 +4877,7 @@ static uint8_t *q_reserve(size_t size)
+         QHdr *w = (QHdr *)(s_q + off);
+         w->type = Q_WRAP;                        /* ring has slack past the end */
+         w->size = (uint32_t)(Q_BYTES - off);
+-        __atomic_store_n(&s_q_head, s_q_head + (Q_BYTES - off), __ATOMIC_RELEASE);
++        s_q_wr += Q_BYTES - off;
+         off = 0;
+     }
+     return s_q + off;
+@@ -4437,12 +4885,15 @@ static uint8_t *q_reserve(size_t size)
+ 
+ static void q_publish(size_t size)
+ {
+-    __atomic_store_n(&s_q_head, s_q_head + size, __ATOMIC_SEQ_CST);
+-    if (__atomic_load_n(&s_q_consumer_waits, __ATOMIC_SEQ_CST)) {
+-        pthread_mutex_lock(&s_q_lock);
+-        pthread_cond_broadcast(&s_q_cv);
+-        pthread_mutex_unlock(&s_q_lock);
+-    }
++    s_q_wr += size;
++    q_publish_now();
++}
++
++static void q_publish_draw(size_t size)
++{
++    s_q_wr += size;
++    if (++s_q_unpub_n >= 8)
++        q_publish_now();
+ }
+ 
+ /* The shadow blocks that changed since the last record: the executor's
+@@ -4457,9 +4908,21 @@ static uint32_t q_reg_collect(void)
+     if (!s_q_live_regs)
+         return 0;
+     for (c = 0; c < REG_WORDS / 16; c++) {
++        uint64_t eight;
++        if (!(c & 7)) {                         /* eight blocks at a time */
++            memcpy(&eight, dirty + c, 8);
++            if (!eight) {
++                c += 7;
++                continue;
++            }
++        }
+         if (!dirty[c])
+             continue;
+         dirty[c] = 0;
++        /* 0xB00..0xBFF: the transform program and constants, which go as
++         * their own rows (q_rows_dirty) and nothing here reads. */
++        if (c >= 0xB00 / 64 && c < 0xC00 / 64)
++            continue;
+         if (memcmp(s_q_live_regs + c * 16, s_q_regs + c * 16, 64) != 0) {
+             uint32_t k;
+             for (k = 0; k < s_q_npend && s_q_pend[k] != c; k++) { }
+@@ -4499,6 +4962,34 @@ static uint32_t q_rows_diff(const uint32_t (*live)[4], uint32_t (*sent)[4], uint
+     return n;
+ }
+ 
++/* The rows marked in the executor's dirty bits (nv2a_pb_vp_dirty) that
++ * differ from what was sent: counted with out NULL, else written, sent
++ * updated and the bits cleared. Same answer both ways: nothing runs between. */
++extern uint32_t *nv2a_pb_vp_dirty(int program);
++static uint32_t q_rows_dirty(const uint32_t (*live)[4], uint32_t (*sent)[4], uint32_t rows,
++                             uint32_t *bits, QRow *out)
++{
++    uint32_t w, n = 0;
++    for (w = 0; w < (rows + 31) / 32; w++) {
++        uint32_t m = bits[w];
++        while (m) {
++            uint32_t r = w * 32 + (uint32_t)__builtin_ctz(m);
++            m &= m - 1;
++            if (r < rows && memcmp(live[r], sent[r], 16) != 0) {
++                if (out) {
++                    out[n].idx = r;
++                    memcpy(out[n].w, live[r], 16);
++                    memcpy(sent[r], live[r], 16);
++                }
++                n++;
++            }
++        }
++        if (out)
++            bits[w] = 0;
++    }
++    return n;
++}
++
+ /* Header plus the shadow changes; returns the offset after them. */
+ static size_t q_write_state(uint8_t *rec, uint32_t type, uint32_t nprog, uint32_t nconst,
+                             const Nv2aRawBatch *b)
+@@ -4510,12 +5001,13 @@ static size_t q_write_state(uint8_t *rec, uint32_t type, uint32_t nprog, uint32_
+     h->nreg = q_reg_emit((QRegChunk *)(rec + at));
+     at += (size_t)h->nreg * sizeof(QRegChunk);
+     if (b && nprog) {
+-        h->nprog = q_rows_diff(b->vp_program, s_q_prog, PROG_ROWS, (QRow *)(rec + at));
++        h->nprog = q_rows_dirty(b->vp_program, s_q_prog, PROG_ROWS, nv2a_pb_vp_dirty(1),
++                                (QRow *)(rec + at));
+         at += (size_t)h->nprog * sizeof(QRow);
+     }
+     if (b && nconst) {
+-        h->nconst = q_rows_diff((const uint32_t (*)[4])b->vp_consts,
+-                                (uint32_t (*)[4])s_q_consts, CONST_ROWS, (QRow *)(rec + at));
++        h->nconst = q_rows_dirty((const uint32_t (*)[4])b->vp_consts, (uint32_t (*)[4])s_q_consts,
++                                 CONST_ROWS, nv2a_pb_vp_dirty(0), (QRow *)(rec + at));
+         at += (size_t)h->nconst * sizeof(QRow);
+     }
+     return at;
+@@ -4535,10 +5027,10 @@ static void q_draw(const Nv2aRawBatch *b)
+     s_q_live_regs = b->regs;
+     nreg = q_reg_collect();
+     if (b->vp_program && b->vp_prog_gen != s_q_prog_gen && b->vp_slots <= PROG_ROWS)
+-        nprog = q_rows_diff(b->vp_program, s_q_prog, PROG_ROWS, NULL);
++        nprog = q_rows_dirty(b->vp_program, s_q_prog, PROG_ROWS, nv2a_pb_vp_dirty(1), NULL);
+     if (b->vp_consts && b->vp_const_gen != s_q_const_gen && b->vp_const_count <= CONST_ROWS)
+-        nconst = q_rows_diff((const uint32_t (*)[4])b->vp_consts,
+-                             (uint32_t (*)[4])s_q_consts, CONST_ROWS, NULL);
++        nconst = q_rows_dirty((const uint32_t (*)[4])b->vp_consts, (uint32_t (*)[4])s_q_consts,
++                              CONST_ROWS, nv2a_pb_vp_dirty(0), NULL);
+     size = sizeof(QHdr) + (size_t)nreg * sizeof(QRegChunk)
+          + (size_t)(nprog + nconst) * sizeof(QRow);
+     batch_at = size;
+@@ -4589,7 +5081,7 @@ static void q_draw(const Nv2aRawBatch *b)
+     memcpy(rec + idx_at, b->indices, (size_t)b->index_count * 4);
+     qb->indices = (const uint32_t *)(uintptr_t)idx_at;
+     ((QHdr *)rec)->size = (uint32_t)size;
+-    q_publish(size);
++    q_publish_draw(size);
+ }
+ 
+ static void q_clear(const Nv2aSurface *sf, const Nv2aRenderState *rs,
+@@ -4620,6 +5112,7 @@ static void q_flip(void)
+     /* No more than two frames behind the executor. */
+     if (__atomic_load_n(&s_q_flips, __ATOMIC_ACQUIRE) >= 2) {
+         uint64_t t0 = hz_now();
++        q_publish_now();
+         pthread_mutex_lock(&s_q_lock);
+         s_q_producer_waits = 1;
+         while (__atomic_load_n(&s_q_flips, __ATOMIC_ACQUIRE) >= 2)
+@@ -4641,11 +5134,19 @@ static void *q_vk_thread(void *arg)
+ {
+     extern void xbox_nx_pin_renderer(void);
+     extern void xbox_nx_track_thread(void *entry);
++    extern void nfsu1_prof_register(const char *name) __attribute__((weak));   /* RECOMP_PROF (PS5) */
+     (void)arg;
++    if (nfsu1_prof_register)
++        nfsu1_prof_register("rec");
+     xbox_nx_pin_renderer();
+     xbox_nx_track_thread((void *)q_vk_thread);
++    /* The read cursor; s_q_tail (the room the executor sees) follows it
++     * eight records at a time, and before this thread waits, after a flip
++     * and whenever the executor waits for room. */
++    size_t rd = s_q_tail;
++    uint32_t unreleased = 0;
+     for (;;) {
+-        size_t avail = __atomic_load_n(&s_q_head, __ATOMIC_SEQ_CST) - s_q_tail;
++        size_t avail = __atomic_load_n(&s_q_head, __ATOMIC_SEQ_CST) - rd;
+         uint8_t *rec;
+         const QHdr *h;
+         size_t at;
+@@ -4653,17 +5154,36 @@ static void *q_vk_thread(void *arg)
+ 
+         if (!avail) {
+             uint64_t t0 = hz_now();
++            if (rd != s_q_tail) {
++                __atomic_store_n(&s_q_tail, rd, __ATOMIC_SEQ_CST);
++                unreleased = 0;
++                if (__atomic_load_n(&s_q_producer_waits, __ATOMIC_SEQ_CST)) {
++                    pthread_mutex_lock(&s_q_lock);
++                    pthread_cond_broadcast(&s_q_cv);
++                    pthread_mutex_unlock(&s_q_lock);
++                }
++            }
+             pthread_mutex_lock(&s_q_lock);
+             __atomic_store_n(&s_q_consumer_waits, 1, __ATOMIC_SEQ_CST);
+-            while (__atomic_load_n(&s_q_head, __ATOMIC_SEQ_CST) == s_q_tail)
++            while (__atomic_load_n(&s_q_head, __ATOMIC_SEQ_CST) == rd)
+                 q_timed_wait();
+             __atomic_store_n(&s_q_consumer_waits, 0, __ATOMIC_SEQ_CST);
+             pthread_mutex_unlock(&s_q_lock);
+             __atomic_add_fetch(&s_q_idle_ns, hz_now() - t0, __ATOMIC_RELAXED);
+             continue;
+         }
+-        rec = s_q + s_q_tail % Q_BYTES;
++        rec = s_q + rd % Q_BYTES;
+         h = (const QHdr *)rec;
++        {   /* The next record was written on the executor's core: start
++             * fetching its first kilobyte while this one is recorded. */
++            size_t next = rd + h->size;
++            if (next - rd < Q_BYTES && next < __atomic_load_n(&s_q_head, __ATOMIC_RELAXED)) {
++                const uint8_t *n = s_q + next % Q_BYTES;
++                int k;
++                for (k = 0; k < 1024 && n + k < s_q + Q_BYTES; k += 64)
++                    __builtin_prefetch(n + k, 1, 3);
++            }
++        }
+         if (h->type != Q_WRAP) {
+             at = sizeof(QHdr);
+             for (i = 0; i < h->nreg; i++, at += sizeof(QRegChunk)) {
+@@ -4681,18 +5201,20 @@ static void *q_vk_thread(void *arg)
+             }
+             s_regs = g_regs;                    /* what clears/presents read */
+             if (h->type == Q_DRAW) {
+-                Nv2aRawBatch bb = *(const Nv2aRawBatch *)(rec + at);
++                /* Fixed up in place: the record is this thread's until the
++                 * tail passes it (a copy of the batch was ~2% of the thread). */
++                Nv2aRawBatch *bb = (Nv2aRawBatch *)(rec + at);
+                 uint32_t a;
+-                bb.regs = g_regs;
+-                bb.vp_program = (const uint32_t (*)[4])g_prog;
+-                bb.vp_consts = (const float (*)[4])g_consts;
++                bb->regs = g_regs;
++                bb->vp_program = (const uint32_t (*)[4])g_prog;
++                bb->vp_consts = (const float (*)[4])g_consts;
+                 for (a = 0; a < NV2A_RAW_ATTRS; a++)
+-                    if (bb.attr_direct & (1u << a))
+-                        bb.direct[a].ptr = rec + (uintptr_t)bb.direct[a].ptr;
+-                bb.attrs = (const float *)(rec + (uintptr_t)bb.attrs);
+-                bb.indices = (const uint32_t *)(rec + (uintptr_t)bb.indices);
++                    if (bb->attr_direct & (1u << a))
++                        bb->direct[a].ptr = rec + (uintptr_t)bb->direct[a].ptr;
++                bb->attrs = (const float *)(rec + (uintptr_t)bb->attrs);
++                bb->indices = (const uint32_t *)(rec + (uintptr_t)bb->indices);
+                 s_q_src = (const uint8_t *const *)(rec + at + Q_ALIGN(sizeof(Nv2aRawBatch)));
+-                vk_draw_raw(&bb);
++                vk_draw_raw(bb);
+                 s_q_src = NULL;
+             } else if (h->type == Q_CLEAR) {
+                 const QClear *c = (const QClear *)(rec + at);
+@@ -4700,13 +5222,18 @@ static void *q_vk_thread(void *arg)
+             } else if (h->type == Q_FLIP) {
+                 vk_flip();
+                 __atomic_sub_fetch(&s_q_flips, 1, __ATOMIC_ACQ_REL);
++                unreleased = 8;                 /* release now: the executor may wait on it */
+             }
+         }
+-        __atomic_store_n(&s_q_tail, s_q_tail + h->size, __ATOMIC_SEQ_CST);
+-        if (__atomic_load_n(&s_q_producer_waits, __ATOMIC_SEQ_CST)) {
+-            pthread_mutex_lock(&s_q_lock);
+-            pthread_cond_broadcast(&s_q_cv);
+-            pthread_mutex_unlock(&s_q_lock);
++        rd += h->size;
++        if (++unreleased >= 8 || __atomic_load_n(&s_q_producer_waits, __ATOMIC_RELAXED)) {
++            __atomic_store_n(&s_q_tail, rd, __ATOMIC_SEQ_CST);
++            unreleased = 0;
++            if (__atomic_load_n(&s_q_producer_waits, __ATOMIC_SEQ_CST)) {
++                pthread_mutex_lock(&s_q_lock);
++                pthread_cond_broadcast(&s_q_cv);
++                pthread_mutex_unlock(&s_q_lock);
++            }
+         }
+     }
+     return NULL;
+@@ -4777,3 +5304,6 @@ void nv2a_vk_install(void)
      nv2a_backend_register(&s_backend);
      fprintf(stderr, "[BOOT] NV2A Vulkan renderer registered\n");
  }
@@ -2618,7 +4005,7 @@ index 0000000..541b9ec
 +
 +#endif /* FAST_TIME_H */
 diff --git a/xboxrecomp/src/platform/win32_compat.c b/xboxrecomp/src/platform/win32_compat.c
-index 63108db..1e1bfcc 100644
+index 63108db..f3356aa 100644
 --- a/xboxrecomp/src/platform/win32_compat.c
 +++ b/xboxrecomp/src/platform/win32_compat.c
 @@ -46,7 +46,9 @@
@@ -2927,8 +4314,7 @@ index 63108db..1e1bfcc 100644
 -}
 -
 -BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldProtect)
-+HANDLE w32_direct_mapping_handle(void *payload, void (*release)(void *))
- {
+-{
 -    (void)address; (void)size; (void)newProtect;
 -    if (oldProtect) *oldProtect = PAGE_READWRITE;
 -    return TRUE;
@@ -2999,7 +4385,8 @@ index 63108db..1e1bfcc 100644
 -#endif
 -
 -LPVOID VirtualAlloc(LPVOID address, SIZE_T size, DWORD allocationType, DWORD protect)
--{
++HANDLE w32_direct_mapping_handle(void *payload, void (*release)(void *))
+ {
 -    int prot  = prot_from_page(protect);
 -    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 -
@@ -3078,7 +4465,7 @@ index 63108db..1e1bfcc 100644
  
  /* ===================================================================== */
  /* Time                                                                  */
-@@ -1992,13 +1607,24 @@ BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldPro
+@@ -1992,13 +1607,34 @@ BOOL VirtualProtect(LPVOID address, SIZE_T size, DWORD newProtect, PDWORD oldPro
  /* 100-ns intervals between 1601-01-01 and 1970-01-01 */
  #define FILETIME_EPOCH_DIFF 116444736000000000ULL
  
@@ -3087,6 +4474,16 @@ index 63108db..1e1bfcc 100644
 + * clock_gettime code below, unchanged. */
 +#include "fast_time.h"
 +void recomp_fast_time_init(void) { ft_init(); }
++/* Monotonic ns for the runtime's own timing (nv2a_vk.c): the fast clock
++ * when on, else clock_gettime. */
++uint64_t recomp_now_ns(void)
++{
++    struct timespec ts;
++    if (ft_active())
++        return ft_now_ns();
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
++}
 +
  VOID GetSystemTimeAsFileTime(LPFILETIME ft)
  {
@@ -3107,7 +4504,7 @@ index 63108db..1e1bfcc 100644
      ft->dwLowDateTime  = (DWORD)(t & 0xFFFFFFFFULL);
      ft->dwHighDateTime = (DWORD)(t >> 32);
  }
-@@ -2034,6 +1660,8 @@ VOID GetLocalTime(LPSYSTEMTIME st)
+@@ -2034,6 +1670,8 @@ VOID GetLocalTime(LPSYSTEMTIME st)
  ULONGLONG GetTickCount64(void)
  {
      struct timespec ts;
@@ -3116,7 +4513,7 @@ index 63108db..1e1bfcc 100644
      clock_gettime(CLOCK_MONOTONIC, &ts);
      return (ULONGLONG)ts.tv_sec * 1000ULL + (ULONGLONG)ts.tv_nsec / 1000000ULL;
  }
-@@ -2043,6 +1671,10 @@ DWORD GetTickCount(void) { return (DWORD)GetTickCount64(); }
+@@ -2043,6 +1681,10 @@ DWORD GetTickCount(void) { return (DWORD)GetTickCount64(); }
  BOOL QueryPerformanceCounter(PLARGE_INTEGER count)
  {
      struct timespec ts;
@@ -3127,7 +4524,7 @@ index 63108db..1e1bfcc 100644
      clock_gettime(CLOCK_MONOTONIC, &ts);
      count->QuadPart = (LONGLONG)ts.tv_sec * 1000000000LL + ts.tv_nsec;
      return TRUE;
-@@ -2104,7 +1736,7 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
+@@ -2104,7 +1746,7 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
  #if defined(__APPLE__)
      memset_s(ptr, cnt, 0, cnt);
  #else
@@ -3136,7 +4533,16 @@ index 63108db..1e1bfcc 100644
  #endif
  }
  
-@@ -2383,237 +2015,7 @@ size_t view_take(const void *addr)
+@@ -2149,7 +1791,7 @@ HANDLE CreateFileA(LPCSTR name, DWORD access, DWORD share,
+     char norm[1024];
+     snprintf(norm, sizeof(norm), "%s", name);
+     xbox_path_normalize(norm);
+-    int fd = open(norm, rw | extra, 0644);
++    int fd = open(norm, rw | extra, 0666);    /* less the umask */
+     if (fd < 0) { SetLastError(ERROR_FILE_NOT_FOUND); return INVALID_HANDLE_VALUE; }
+     return w32_open_handle(fd, name);
+ }
+@@ -2383,237 +2025,7 @@ size_t view_take(const void *addr)
      return len;
  }
  
@@ -3150,7 +4556,7 @@ index 63108db..1e1bfcc 100644
 -    Handle shm;
 -    Result rc;
 -    w32_object *o;
- 
+-
 -    (void)file; (void)sa; (void)protect; (void)name;
 -    if (!size) { SetLastError(ERROR_INVALID_PARAMETER); return NULL; }
 -    pthread_mutex_lock(&s_nx_lock);
@@ -3183,7 +4589,7 @@ index 63108db..1e1bfcc 100644
 -    (void)name;
 -    return CreateFileMappingA(file, sa, protect, maxSizeHigh, maxSizeLow, NULL);
 -}
--
+ 
 -LPVOID MapViewOfFileEx(HANDLE mapping, DWORD access, DWORD offHigh, DWORD offLow,
 -                       SIZE_T count, LPVOID baseAddr)
 -{
@@ -3374,7 +4780,7 @@ index 63108db..1e1bfcc 100644
  
  /* ===================================================================== */
  /* VirtualQuery                                                           */
-@@ -2638,36 +2040,7 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
+@@ -2638,36 +2050,7 @@ BOOL UnmapViewOfFile(LPCVOID baseAddr)
   * honest answer: a host heap pointer is not a Win32 reservation, and the
   * callers that branch on this want to know which allocator owns the pointer.
   */
@@ -3411,7 +4817,7 @@ index 63108db..1e1bfcc 100644
  
  BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
  {
-@@ -2710,7 +2083,12 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
+@@ -2710,7 +2093,12 @@ BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX b)
      b->ullAvailPhys     = avail;
      b->ullTotalPageFile = b->ullTotalPhys + (ULONGLONG)swap.xsu_total;
      b->ullAvailPageFile = b->ullAvailPhys + (ULONGLONG)swap.xsu_avail;

@@ -76,8 +76,10 @@ for file in "$sdk"/target/lib/*.so; do
     case "$file" in *libScePosixForWebKit.so|*libSceGLSlimVSH.so|*libc_stub_weak.so) continue;; esac
     stubs+=("$file")
 done
+# --wrap: ps5/src/video_hz.c sees Mesa's VideoOut handle and its 119.88 Hz restore.
 "$sdk/bin/prospero-lld" "${radv_linker_script[@]}" "${flags[@]}" \
     --version-script "$work/exports.map" --exclude-libs=ALL --no-dynamic-linker --gc-sections \
+    --wrap=sceVideoOutOpen --wrap=sceVideoOutConfigureOutput \
     -e _start -o "$work/llvm-pie.elf" \
     "$build/CMakeFiles/nfsu1_start.dir/src/main_ps5.c.o" \
     "$build/CMakeFiles/nfsu1_start.dir/src/native_start.c.o" "$(find "$build/CMakeFiles/nfsu1_start.dir" -name vulkan_shim.c.o -print -quit)" "$work/obj/cpp-runtime.o" \

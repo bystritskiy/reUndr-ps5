@@ -28,6 +28,8 @@ extern int scePthreadSetaffinity(unsigned long,unsigned long);
 extern int sceKernelSendNotificationRequest(int,void *,size_t,int);
 extern int sceKernelUsleep(unsigned);
 extern int nfsu1_movie_skip_down(void);
+extern void nfsu1_ps5_video_hz_start(void);   /* video_hz.c */
+extern void nfsu1_prof_start(void);           /* prof_ps5.c: RECOMP_PROF */
 static void notify(const char *text) {
  struct { char reserved[45];char message[3075]; } note;memset(&note,0,sizeof note);
  snprintf(note.message,sizeof note.message,"reUndr: %s",text);sceKernelSendNotificationRequest(0,&note,sizeof note,0);
@@ -150,7 +152,7 @@ static FILE *open_log(const char *path,int *fd_out) {
 }
 static void load_settings(void) {
  FILE *f=fopen("/data/reUndr/nfsu1_env.txt","r");if(!f)return;
- char line[512];
+ char line[4096];
  while(fgets(line,sizeof line,f)) { char *key=line;while(*key==' '||*key=='\t')key++;
    if(*key=='#'||*key=='\n')continue;char *eq=strchr(key,'=');if(!eq)continue;*eq++=0;
    char *end=key+strlen(key);while(end>key&&(end[-1]==' '||end[-1]=='\t'))*--end=0;
@@ -180,21 +182,39 @@ static void move_old_data(void) {
  }
  closedir(d);rmdir("/data/nfsu1");
 }
+/* Files under /data/reUndr stay writable for everyone: PS5Upload and FTP run as another user
+   and could not replace saves the game had written 644 in 755 folders. The runtime opens up
+   saves as it makes them (chmod: umask() is an illegal call for the title, 0xa002030a on the
+   console 2026-11-26); this opens up those made before. Top-level files, and save/ in full. */
+static void open_up(const char *dir,int depth) {
+ DIR *d=opendir(dir);struct dirent *e;char p[1024];struct stat st;if(!d)return;
+ while((e=readdir(d))) {
+   if(e->d_name[0]=='.')continue;snprintf(p,sizeof p,"%s/%s",dir,e->d_name);if(stat(p,&st))continue;
+   if(S_ISDIR(st.st_mode)) { if(depth>0) { if((st.st_mode&0777)!=0777)chmod(p,0777);open_up(p,depth-1); } }
+   else if(S_ISREG(st.st_mode)&&(st.st_mode&0666)!=0666)chmod(p,(st.st_mode&0777)|0666);
+ }
+ closedir(d);
+}
 int main(int argc,char **argv) {
  (void)argc;(void)argv;
  scePthreadSetaffinity((unsigned long)pthread_self(),0x1fff);
  mkdir("/data/reUndr",0777);chmod("/data/reUndr",0777);
  move_old_data();
- mkdir("/data/reUndr/save",0777);
+ mkdir("/data/reUndr/save",0777);chmod("/data/reUndr/save",0777);
+ open_up("/data/reUndr",0);open_up("/data/reUndr/save",8);
  FILE *out=open_log("/data/reUndr/stdout.log",NULL),*err=open_log("/data/reUndr/stderr.log",&g_crash_log_fd);
  if(!out||!err)return 1;stdout=out;stderr=err;load_settings();
- sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.002.001\n");
+ sceKernelDebugOutText(0,"[NFSU1] PS5 native boot 01.003.000\n");
  SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"offscreen");
  setenv("RECOMP_GIL_EAGER","1",0);setenv("RECOMP_CULL","0",0);
  setenv("RECOMP_GL_SCALE","4.5",0);setenv("RECOMP_VK_HEADLESS","0",1);
  /* Lossless HD UI shares the existing LRU with world textures. */
  setenv("RECOMP_GL_TEX_MB","512",0);
- setenv("RECOMP_QUIET","1",0);setenv("NFSU2_FPS_CAP","60",0);
+ /* 120 fps where the output takes 119.88 Hz (video_hz.c), 60 elsewhere. */
+ setenv("RECOMP_QUIET","1",0);setenv("NFSU2_FPS_CAP","120",0);
+ /* Vulkan commands recorded on a thread of their own, beside the pushbuffer
+    executor (docs/PERFORMANCE.md). RECOMP_VK_THREAD=0 records on the executor. */
+ setenv("RECOMP_VK_THREAD","1",0);
  /* Guest clocks from the TSC: clock_gettime is a ~20 us system call on the PS5 (PS5_Vulkan docs/HARDWARE_FINDINGS.md:3261-3266). Measured on a PS5 (Inner City race): guest main thread 6.75->5.65 ms/frame, race hitches 2->0. RECOMP_FAST_TIME=0 in nfsu1_env.txt restores clock_gettime. */
  setenv("RECOMP_FAST_TIME","1",0);
  { unsigned other=0;pthread_t t;if(!pthread_create(&t,NULL,tls_probe,&other))pthread_join(t,NULL);
@@ -215,6 +235,8 @@ int main(int argc,char **argv) {
  /* HD packs sit beside the game: /data/reUndr/hd, /mnt/usbN/reUndr/hd. */
  char hd[1024];snprintf(hd,sizeof hd,"%.*shd",(int)strlen(dir)-4,dir);setenv("NFSU1_HD_DIR",hd,0);
  sceSystemServiceHideSplashScreen();
+ nfsu1_ps5_video_hz_start();
+ nfsu1_prof_start();
  pthread_attr_t attr;pthread_t th;void *rc=NULL;
  pthread_attr_init(&attr);pthread_attr_setstacksize(&attr,16*1024*1024);
  int thread_error=pthread_create(&th,&attr,game,NULL);pthread_attr_destroy(&attr);

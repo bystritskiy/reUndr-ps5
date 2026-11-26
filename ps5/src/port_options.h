@@ -11,7 +11,7 @@ enum {
     NFSU1_OPT_SQUARE,       /* off on */
     NFSU1_OPT_REFLECTIONS,  /* off on */
     NFSU1_OPT_LOD,          /* 1x 2x 3x 4.5x 6x 8x */
-    NFSU1_OPT_FPS,          /* 60 30 */
+    NFSU1_OPT_FPS,          /* 30 60 120 (on a 119.88 Hz output) */
     NFSU1_OPT_OVERLAY,      /* off on */
     NFSU1_OPT_PAUSE,        /* off on: the port menu holds the title */
     NFSU1_OPT_TEXT_LANG,    /* lang.txt's two text choices; from the next start */
@@ -19,6 +19,8 @@ enum {
     NFSU1_OPT_MUSIC,        /* lang.txt's two music choices; from the next start */
     NFSU1_OPT_SPEAKERS,     /* off on: music and menus on every speaker (PS5) */
     NFSU1_OPT_SPEAKER_TEST, /* off, eight channels, all in turn; never kept */
+    NFSU1_OPT_BLUR,         /* motion blur: off low original */
+    NFSU1_OPT_VIBRATION,    /* off 10% .. 100% (PS5) */
     NFSU1_OPT_COUNT
 };
 

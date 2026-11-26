@@ -3,6 +3,7 @@
 #include "platform/win32_compat.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 extern int scePadInit(void);
@@ -17,6 +18,9 @@ extern int sceUserServiceGetInitialUser(int *);
 /* Public UserService ABI: four signed user IDs; unused entries are -1. */
 typedef struct { int user[4]; } LoginUsers;
 extern int sceUserServiceGetLoginUserIdList(LoginUsers *);
+/* gear_pulse_ps5.c: a knock at each gear change (absent from the host tests). */
+extern void nfsu1_gear_pulse_motors(unsigned port, uint8_t large, uint8_t small) __attribute__((weak));
+extern void nfsu1_gear_pulse_update(unsigned port, int handle, int menu_open) __attribute__((weak));
 #define PAD_PORTS 2
 #define INVALID_USER (-1)
 typedef struct {
@@ -63,6 +67,80 @@ static uint32_t combo_filter(uint32_t raw)
     if (now >= pulse_until) pulse = 0;
     out = passed | pulse;
     return (raw & ~COMBO_BUTTONS) | out;
+}
+/* NFSU1_PAD_SCRIPT (nfsu1_env.txt): timed presses on pad 1, for runs nobody
+ * plays (benchmarks). Steps "ms:buttons:hold_ms" joined with ',', times from
+ * the title's first pad read; buttons joined with '+': cross circle square
+ * triangle options touchpad up down left right l1 r1 l2 r2 sl sr (left stick
+ * fully left/right). Until its last step ends, pad 1 reads as connected. */
+#define SCRIPT_MAX 192
+typedef struct { uint32_t at, hold, buttons; uint8_t l2, r2, lx; } ScriptStep;
+static ScriptStep s_script[SCRIPT_MAX];
+static int s_script_n = -1;
+static uint64_t s_script_t0;
+static void script_parse(void)
+{
+    static const struct { const char *name; uint32_t buttons; uint8_t l2, r2, lx; } names[] = {
+        {"cross",0x4000,0,0,128},{"circle",0x2000,0,0,128},{"square",0x8000,0,0,128},
+        {"triangle",0x1000,0,0,128},{"options",0x08,0,0,128},{"touchpad",0x100000,0,0,128},
+        {"up",0x10,0,0,128},{"down",0x40,0,0,128},{"left",0x80,0,0,128},{"right",0x20,0,0,128},
+        {"l1",0x400,0,0,128},{"r1",0x800,0,0,128},{"l2",0,255,0,128},{"r2",0,0,255,128},
+        {"sl",0,0,0,0},{"sr",0,0,0,255},
+    };
+    const char *p = getenv("NFSU1_PAD_SCRIPT");
+    s_script_n = 0;
+    while (p && *p && s_script_n < SCRIPT_MAX) {
+        char *end;
+        ScriptStep st = {.lx = 128};
+        st.at = (uint32_t)strtoul(p, &end, 10);
+        if (*end != ':') break;
+        p = end + 1;
+        while (*p && *p != ':') {
+            size_t len = strcspn(p, "+:");
+            for (unsigned k = 0; k < sizeof names / sizeof *names; k++)
+                if (strlen(names[k].name) == len && !strncmp(names[k].name, p, len)) {
+                    st.buttons |= names[k].buttons;
+                    if (names[k].l2) st.l2 = names[k].l2;
+                    if (names[k].r2) st.r2 = names[k].r2;
+                    if (names[k].lx != 128) st.lx = names[k].lx;
+                }
+            p += len;
+            if (*p == '+') p++;
+        }
+        if (*p != ':') break;
+        st.hold = (uint32_t)strtoul(p + 1, &end, 10);
+        s_script[s_script_n++] = st;
+        p = *end == ',' ? end + 1 : NULL;
+    }
+    if (s_script_n)
+        fprintf(stderr, "[pad] script with %d steps\n", s_script_n);
+}
+/* The scripted state now, into data; 1 while the script runs. */
+static int script_apply(Nfsu1PadData *data)
+{
+    uint64_t now = now_ms(), t;
+    if (s_script_n < 0) script_parse();
+    if (!s_script_n) return 0;
+    if (!s_script_t0) s_script_t0 = now;
+    t = now - s_script_t0;
+    const ScriptStep *last = &s_script[s_script_n - 1];
+    if (t >= (uint64_t)last->at + last->hold)
+        return 0;
+    if (!data->connected) {             /* no pad while the script runs */
+        memset(data, 0, sizeof *data);
+        data->lx = data->ly = data->rx = data->ry = 128;
+        data->connected = 1;
+    }
+    for (int i = 0; i < s_script_n; i++) {
+        const ScriptStep *st = &s_script[i];
+        if (t >= st->at && t < (uint64_t)st->at + st->hold) {
+            data->buttons |= st->buttons;
+            if (st->l2) data->l2 = st->l2;
+            if (st->r2) data->r2 = st->r2;
+            if (st->lx != 128) data->lx = st->lx;
+        }
+    }
+    return 1;
 }
 static void init_services(void)
 {
@@ -182,7 +260,11 @@ DWORD xbox_InputGetState(DWORD port, XBOX_INPUT_STATE *state)
     pthread_mutex_lock(&lock);
     scan_locked();
     int ok = read_slot(&slots[port], &data);
+    if (ok && nfsu1_gear_pulse_update)
+        nfsu1_gear_pulse_update(port, slots[port].handle, port == 0 && hold_menu);
     void (*filter)(void *, unsigned) = host_filter;
+    if (port == 0 && script_apply(&data))
+        ok = 1;
     if (ok) {
         /* The port menu's buttons stay with it until every one is let go. */
         if (port == 0 && hold_game) {
@@ -202,16 +284,29 @@ BOOL xbox_InputIsConnected(DWORD port)
     XBOX_INPUT_STATE state;
     return xbox_InputGetState(port, &state) == ERROR_SUCCESS;
 }
+/* Vibration strength in percent: the port menu's Vibration (recomp_manual.c). */
+volatile int nfsu1_vibration_pct = 100;
 DWORD xbox_InputSetState(DWORD port, const XBOX_VIBRATION *vibration)
 {
     if (port >= PAD_PORTS || !vibration) return ERROR_DEVICE_NOT_CONNECTED;
     xbox_InputInit();
-    uint8_t motors[2] = { vibration->wLeftMotorSpeed >> 8, vibration->wRightMotorSpeed >> 8 };
+    unsigned pct = nfsu1_vibration_pct < 0 ? 0 : nfsu1_vibration_pct > 100 ? 100 : (unsigned)nfsu1_vibration_pct;
+    unsigned large = vibration->wLeftMotorSpeed * pct / 100, small = vibration->wRightMotorSpeed * pct / 100;
+    /* On an Xbox pad the large motor shakes the whole body; a DualSense's
+     * motor bytes drive one actuator per grip, and NFSU1 runs only the large
+     * one, so the right grip would stay still: it gets the large motor too,
+     * unless the title asks for more. */
+    unsigned right = small > large ? small : large;
+    uint8_t motors[2] = { (uint8_t)(large >> 8), (uint8_t)(right >> 8) };
     Nfsu1PadData data;
     pthread_mutex_lock(&lock);
     scan_locked();
-    int rc = read_slot(&slots[port], &data)
-        ? scePadSetVibration(slots[port].handle, motors) : -1;
+    int rc = -1;
+    if (read_slot(&slots[port], &data)) {
+        rc = scePadSetVibration(slots[port].handle, motors);
+        if (nfsu1_gear_pulse_motors)
+            nfsu1_gear_pulse_motors(port, motors[0], motors[1]);
+    }
     pthread_mutex_unlock(&lock);
     return rc >= 0 ? ERROR_SUCCESS : ERROR_DEVICE_NOT_CONNECTED;
 }

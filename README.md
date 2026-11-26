@@ -44,7 +44,8 @@ A replacement runtime handles the original console's graphics, audio, input and 
 
 ## Highlights
 
-- **Native 4K.** Rendering and output at 3840x2160, up to 60 fps.
+- **Native 4K at up to 120 fps.** Rendering and output at 3840x2160, at 120 fps on a 120 Hz display
+  and 60 elsewhere.
 - **HD text.** Every font is redrawn: the Conduit faces stroke by stroke with square ends, as on the
   disc but sharp at 4K, and Arial as Liberation Sans.
 - **DualSense throughout.** Cross, Circle, Square and Triangle in the prompts, PlayStation wording
@@ -142,7 +143,7 @@ merges two controllers into one, doesn't add a player.
 ## Settings
 
 Press **Touchpad + Options** during the game for the port menu. It has render scale, FXAA,
-filtering, reflections, detail distance (8x by default), All Speakers (on by default), a speaker
+filtering, reflections, motion blur (Off, Low, Original), detail distance (8x by default), vibration strength (both grips, a knock at each gear change), All Speakers (on by default), a speaker
 test that plays a tone from one speaker at a time, the frame rate, a performance overlay and a
 60-second benchmark; changes apply at once. The game's own Options menu is the original one.
 Saved settings override the configuration file below.
@@ -153,7 +154,7 @@ Saved settings override the configuration file below.
 |---|---|---|
 | `NFSU1_OUTPUT_HEIGHT` | 2160 | output height: 1080, 1440 or 2160 |
 | `RECOMP_GL_SCALE` | 4.5 | render scale; 4.5 is 4K, 2.25 is 1080p |
-| `NFSU2_FPS_CAP` | 60 | 30 brings back the game's own limit |
+| `NFSU2_FPS_CAP` | 120 | frame rate when none is saved: 120 (60 on a display without 120 Hz), 60 or 30, the game's own limit |
 | `RECOMP_VK_ANISO` | 16 | anisotropic filtering |
 | `RECOMP_VK_FXAA` | 1 | FXAA |
 | `RECOMP_AUDIO_VOLUME` | | volume |

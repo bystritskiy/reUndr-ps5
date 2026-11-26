@@ -1,7 +1,7 @@
 # Switches added or used by the performance and graphics changes
 
-All of these are proposals and opt-in, except `RECOMP_FAST_TIME`, which this PR proposes to turn on by
-default. With nothing set, every other switch keeps the original behaviour. Set them as `KEY=VALUE`
+All of these are opt-in except `RECOMP_FAST_TIME`, `RECOMP_VK_THREAD` and `NFSU2_FPS_CAP=120`, which
+the PS5 build turns on by default. With nothing set, every other switch keeps the original behaviour. Set them as `KEY=VALUE`
 lines in `/data/reUndr/nfsu1_env.txt`; they are read once at start. Values outside the listed
 range fall back to the default unless the row says otherwise.
 
@@ -13,6 +13,22 @@ Background: [PERFORMANCE.md](PERFORMANCE.md) (why the clock and TLS changes), [G
 | Switch | Default | Values | What it does | Cost | When to change |
 |---|---|---|---|---|---|
 | `RECOMP_FAST_TIME` | **1 (proposed on)** | 0, 1 | Guest clocks (`QueryPerformanceCounter`, `GetTickCount64`, `GetSystemTimeAsFileTime`, so every guest time source) from the TSC, re-anchored to `CLOCK_MONOTONIC` every 2 ms, never going backwards. 0 = the original `clock_gettime` code. Boot line `[time] fast on/off`; when on, a self-check line every 10 s. | Saves ~1 ms of guest time per race frame on the PS5 (a `clock_gettime` system call is ~20 us). Error vs `clock_gettime` 2.7-4.5 us on the console. | Set 0 if anything time-related misbehaves, for example after rest mode (re-anchoring after a TSC jump is tested on a Linux host only). |
+
+## Frame rate and output (PS5)
+
+| Switch | Default | Values | What it does | Cost | When to change |
+|---|---|---|---|---|---|
+| `NFSU2_FPS_CAP` | 120 | 30, 60, 120 | Frame rate when `nfsu1x_options.txt` has none (the port menu's Frame Rate saves one). 120 only where the output runs at 119.88 Hz, 60 elsewhere. Log: `[fps] 120 fps on a 119.880 Hz output`. | At 120 the CPU and GPU work twice as often; see [PERFORMANCE.md](PERFORMANCE.md#120-fps). | 60 for the old default. |
+| `NFSU1_VIDEO_HZ` | unset | 60 | 60: Mesa's own 119.88 Hz check decides alone, as before; on a VRR display it fails, so the output stays at 59.94 Hz. Log: `[video] ...`. | - | If the display misbehaves at 120 Hz. |
+| `RECOMP_VK_THREAD` | **1 on the PS5** | 0, 1 | Vulkan commands are recorded on a thread of their own; the pushbuffer executor only decodes and queues. 0 records on the executor, as before. | One more busy thread. | 0 to rule it out when something draws wrong. |
+| `RECOMP_VBLANK_HZ` | the output's | 20-500 | The guest vblank rate, fixed at start (the frame rate setting changes it otherwise). | - | Testing only. |
+
+## Measuring (PS5)
+
+| Switch | Default | Values | What it does |
+|---|---|---|---|
+| `RECOMP_PROF` | unset | `<start_s>[:<length_s>]` | From `start_s` after boot for `length_s` (default 60) the guest main thread, the executor and the recording thread are sampled every millisecond into `/data/reUndr/prof.bin`, to be matched against `llvm-pie.elf` on the computer. |
+| `NFSU1_PAD_SCRIPT` | unset | `ms:buttons:hold_ms,...` | Presses pad 1's buttons at fixed times after start (`cross`, `options`, `r2`, `l2+sr`, ...), for the same run every time. |
 
 ## Light trails and glare (NFSU1 only)
 
