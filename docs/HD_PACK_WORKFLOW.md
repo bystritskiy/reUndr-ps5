@@ -109,3 +109,24 @@ not in it: the game composites them at run time, so no file on the disc holds th
 `tools/build-hd-pack.py` (also in this PR) converts a TexMod `.tpf` retexture you own into the same
 format, keyed by exact Xbox bytes. It was used for a first test with a PC retexture pack, which was then
 replaced entirely by the workflow above, because that pack's art differs from the original.
+
+## Sharing a pack: a patch that needs the disc
+
+A finished pack is made of the disc's own textures, so it is not shared as it is. `tools/hdpatch/hdpatch.py`
+turns it into a patch that is noise without the disc: each file is XORed with a SHAKE-256 stream keyed by
+the SHA-256 of the original texture it replaces (the bytes the runtime hashes to find it). That key is not
+in the patch; whoever has the disc derives it again, and `apply` rebuilds the pack byte for byte, checking
+every file against its SHA-256. Files that ship in the release package (`PPSA99025/hd`) are not in the
+patch; `apply` takes them from `--base`.
+
+```sh
+# the pack's author
+python3 tools/hdpatch/hdpatch.py make  --game <disc> --pack <hd> --base <PPSA99025/hd> --out <patch>
+# everyone else: their own disc + the patch -> the same hd folder
+python3 tools/hdpatch/hdpatch.py apply --game <disc> --patch <patch> --base <PPSA99025/hd> --out <hd>
+```
+
+Both read every texture container on the disc (a few minutes). `apply` writes `manifest.bin` only when
+every file was rebuilt, so another disc revision, a missing folder or a modified file leaves no half pack
+for the game to load; it lists what failed. `python3 tools/hdpatch/test_hdpatch.py` checks the round trip.
+This does not change what the pack is derived from; it only means the patch alone carries no texture.
