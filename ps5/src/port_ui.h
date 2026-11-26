@@ -1,11 +1,8 @@
-/* reUndr PS5, MIT. Optional replacement labels for port-owned UI rows, and
- * an optional second choice for text, voice and music (port_ui.c). */
+/* reUndr PS5, MIT. An optional second choice for text, voice and music
+ * (port_ui.c). */
 #ifndef NFSU1_PORT_UI_H
 #define NFSU1_PORT_UI_H
 #include <stddef.h>
-int nfsu1_port_ui_custom(void);
-int nfsu1_port_ui_hide_trailers(void);
-const char *nfsu1_port_ui_text(const char *text);
 /* Kinds: 0 text, 1 voice, 2 music. Choices: 0 first, 1 second. */
 int nfsu1_port_lang_count(void);
 int nfsu1_port_lang_kind(int i);

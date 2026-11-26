@@ -7,7 +7,7 @@ user from their own disc.
 
 ## What stays as it is
 
-- **Resolution and render scale are the port's own** (Port Settings, `RECOMP_GL_SCALE`). Nothing here
+- **Resolution and render scale are the port's own** (port menu, `RECOMP_GL_SCALE`). Nothing here
   raises the resolution behind the user's back; supersampling exists as an option but is off and was
   not used.
 - Models, level geometry, shaders, lighting, the HUD, FXAA and anisotropic filtering are untouched.

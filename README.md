@@ -144,8 +144,8 @@ merges two controllers into one, doesn't add a player.
 Press **Touchpad + Options** during the game for the port menu. It has render scale, FXAA,
 filtering, reflections, detail distance (8x by default), All Speakers (on by default), a speaker
 test that plays a tone from one speaker at a time, the frame rate, a performance overlay and a
-60-second benchmark; changes apply at once. Options → Port Settings (Camera in the original
-game) has the picture and sound rows too. Saved settings override the configuration file below.
+60-second benchmark; changes apply at once. The game's own Options menu is the original one.
+Saved settings override the configuration file below.
 
 `/data/reUndr/nfsu1_env.txt` is optional and holds `KEY=VALUE` lines read at start:
 

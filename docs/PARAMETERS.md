@@ -64,4 +64,4 @@ NFSU1_HD_P8=1
 ```
 
 `RECOMP_FAST_TIME` is on by default with this PR; `RECOMP_VK_SSAA` was left off. Render scale 4.5
-(4K) from the game's Port Settings.
+(4K) from the port menu.
