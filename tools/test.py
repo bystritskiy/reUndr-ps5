@@ -66,3 +66,55 @@ for name,sources in [('port_ui',['ps5/src/port_ui.c']),('xbe_check',['ps5/src/xb
             assert (top/'hd/manifest.bin').read_bytes()==(top/'hdpatch/manifest.bin').read_bytes()
             assert (top/'hd/hdpatch.id').read_text().upper()==hashlib.sha256((top/'hdpatch/index.bin').read_bytes()).hexdigest().upper()
         print('HD patch: previous hd kept once, files opened once and kept')
+        # the whole patch at the start: a game folder whose texture packs (TPK) are read as nfs_assets.py reads them
+        import sys;sys.path.insert(0,str(root/'tools'));import nfs_assets
+        def sampled(b):                                  # nv2a_vk.c bytes_hash()
+            v=2166136261^len(b);step=max(4,len(b)//256)&~3
+            for i in range(0,len(b)-3,step): v=((v^struct.unpack_from('<I',b,i)[0])*16777619)&0xffffffff
+            return ((v^struct.unpack_from('<I',b,len(b)-4)[0])*16777619)&0xffffffff
+        def chunk(ident,body): return struct.pack('<II',ident,len(body))+body
+        def tpk(rows,blob,compressed=None):              # rows: (hash, format, offset, palette, size, palette size)
+            recs=b''.join(struct.pack('<12s24sI8x4I4xHH6xB45x',b'',b'T%d'%h,h,o,p,s,ps,4,4,1) for h,f,o,p,s,ps in rows)
+            fmts=b''.join(struct.pack('<12sI44x',b'',f) for h,f,o,p,s,ps in rows)
+            body=chunk(0x33310004,recs)+chunk(0x33310005,fmts)+(chunk(0x33310003,compressed) if compressed is not None else b'')
+            return body,chunk(0x33320001,bytes(0x78)+blob)
+        top=out/'hd-prepare';shutil.rmtree(top,ignore_errors=True);(top/'hdpatch/files').mkdir(parents=True);(top/'game/TRACKS').mkdir(parents=True)
+        dxt=bytes(range(40,48));p8=bytes(k%3 for k in range(16));pal=bytes(range(128));lz=bytes(range(60,68))*2
+        body_a,blob_a=tpk([(1,0x0C,0,0,8,0),(2,0x0B,136,8,16,128)],dxt+pal+p8)   # this palette sits before its indices
+        packed=nfs_assets.jdlz_encode(lz)
+        body_b,_=tpk([(3,0x0E,0,0,16,0)],b'',bytes(20))
+        head=chunk(0x00034110,b'not a texture pack')    # chunks before the pack, as in the game files
+        a=chunk(0xB3300000,body_a+blob_a)
+        b_without=chunk(0xB3300000,body_b+chunk(0x33320001,bytes(0x78)))
+        at=len(head)+len(a)+len(b_without)
+        b=chunk(0xB3300000,body_b.replace(chunk(0x33310003,bytes(20)),chunk(0x33310003,struct.pack('<5I',3,at+8,len(packed),0,0)))
+                +chunk(0x33320001,bytes(0x78)))
+        container=head+a+b+chunk(0,packed)               # the compressed bytes sit at an absolute offset
+        assert len(head+a+b)==at and container[at+8:at+8+len(packed)]==packed
+        (top/'game/TRACKS/T.BIN').write_bytes(container)
+        (top/'game/MOVIES').mkdir();(top/'game/MOVIES/m.mad').write_bytes(b'\xff'*64)   # not a chunk file
+        rows=list(nfs_assets.textures(container))
+        assert [(r['format'],nfs_assets.texture_payload(container,r)) for r in rows]==[(0x0C,dxt),(0x0B,p8),(0x0E,lz)]
+        srcs=[(0x0C,dxt,dxt),(0x0B,p8+pal,p8),(0x0E,lz,lz),(0x0C,b'release only',b'release only')]
+        plain=[b'NHD1'+struct.pack('<III',8,8,256)+bytes((k*(r+3))&255 for k in range(256)) for r in range(4)]
+        names=[('%032x.rgba'%(r+1)) for r in range(4)]
+        order=sorted(range(4),key=lambda r:sampled(srcs[r][2]))
+        recs=b''.join(struct.pack('<9I48s',srcs[r][0],4,4,len(srcs[r][1]),sampled(srcs[r][2]),8,8,fnv(srcs[r][1])&0xffffffff,fnv(srcs[r][1])>>32,names[r].encode()) for r in order)
+        (top/'hdpatch/manifest.bin').write_bytes(struct.pack('<4sIII',b'NHDX',1,4,84)+recs)
+        for r in range(3):
+            pad=hashlib.shake_256(key(srcs[r][1])+names[r].encode()).digest(len(plain[r]))
+            (top/'hdpatch/files'/names[r]).write_bytes(bytes(x^y for x,y in zip(plain[r],pad)))
+        (fixture/names[3]).write_bytes(plain[3])
+        (top/'hdpatch/index.bin').write_bytes(struct.pack('<4sIII',b'NHDP',1,4,72)+b''.join(
+            bytes(32)+hashlib.sha256(plain[r]).digest()+struct.pack('<II',len(plain[r]),2 if r==3 else 1) for r in order))
+        env=dict(os.environ,NFSU1_HD_DIR=str(top/'hd'))
+        result=subprocess.run([str(binary),'prepare',str(top/'not-mounted')],capture_output=True,text=True,timeout=25,env=env)
+        print(result.stdout+result.stderr,end='');result.check_returncode()
+        assert not (top/'hd/hdpatch.done').exists(),'done without reading the game'   # a USB folder not there yet
+        for run in (1,2):
+            result=subprocess.run([str(binary),'prepare',str(top/'game')],capture_output=True,text=True,timeout=25,env=env)
+            print(result.stdout+result.stderr,end='');result.check_returncode()
+            assert all((top/'hd'/names[r]).read_bytes()==plain[r] for r in range(4)),'a file did not open at the start'
+            assert (top/'hd/hdpatch.done').read_text()==(top/'hd/hdpatch.id').read_text()
+            assert ('HD prepare: progress 0' in result.stdout)==(run==2),result.stdout   # the second start does not read the game
+        print('HD prepare: DXT, P8 and JDLZ textures and a release copy open at the start; the second start waits for nothing')

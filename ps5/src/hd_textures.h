@@ -21,6 +21,10 @@ const NfsHdTexture *nfsu1_hd_find_p8(const void *indices, uint32_t w, uint32_t h
                                      uint32_t sample_hash);
 /* malloc'd pixels (the caller frees them), or NULL. */
 void *nfsu1_hd_load(const NfsHdTexture *texture, NfsHdPixels *info);
+/* A patch beside the hd folder (tools/hdpatch) opens whole here, before the game runs, from the
+ * texture packs of the game folder; progress (may be NULL) gets 0..100 while it reads them.
+ * Once done (hd/hdpatch.done) it returns at once. Then preload (NFSU1_HD_PRELOAD=1) starts. */
+void nfsu1_hd_patch_prepare(const char *game, void (*progress)(unsigned percent));
 /* NHD2 files held in RAM so far (NFSU1_HD_PRELOAD=1). */
 uint32_t nfsu1_hd_preloaded(void);
 #endif

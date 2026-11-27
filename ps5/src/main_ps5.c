@@ -6,6 +6,7 @@
 #include "disc_image.h"
 #include "ui_text.h"
 #include "screen_ps5.h"
+#include "hd_textures.h"
 #include <SDL3/SDL.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -65,6 +66,13 @@ static const Nfsu1ScreenLine UNPACKING[]={
  {440,4,0,"When it is done, the game starts and you can delete the .iso."}};
 static void unpack_progress(unsigned percent) {
  nfsu1_screen_show(UNPACKING,sizeof UNPACKING/sizeof *UNPACKING,(int)percent);
+}
+static const Nfsu1ScreenLine PREPARING_HD[]={
+ {260,7,ACCENT,"Opening the HD textures"},
+ {380,4,0,"This happens once for a new HD patch: your game files are its key."},
+ {440,4,0,"Then the game starts, with every HD texture ready."}};
+static void hd_progress(unsigned percent) {
+ nfsu1_screen_show(PREPARING_HD,sizeof PREPARING_HD/sizeof *PREPARING_HD,(int)percent);
 }
 static int image_error;
 /* 0 when dir holds no image of the supported disc, 1 once it is unpacked. */
@@ -234,6 +242,7 @@ int main(int argc,char **argv) {
  if(strcmp(dir,"/app0/game")) { mkdir("/data/reUndr/ui",0777);nfsu1_ui_text_prepare(dir,"/data/reUndr/ui"); }
  /* HD packs sit beside the game: /data/reUndr/hd, /mnt/usbN/reUndr/hd. */
  char hd[1024];snprintf(hd,sizeof hd,"%.*shd",(int)strlen(dir)-4,dir);setenv("NFSU1_HD_DIR",hd,0);
+ nfsu1_hd_patch_prepare(dir,hd_progress);nfsu1_screen_close();
  sceSystemServiceHideSplashScreen();
  nfsu1_ps5_video_hz_start();
  nfsu1_prof_start();

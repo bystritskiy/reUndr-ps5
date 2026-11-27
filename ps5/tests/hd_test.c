@@ -42,10 +42,18 @@ static int patch_mode(void)
     puts("HD patch: opened by the original in hand, shared file, release copy, damaged file refused");
     return 0;
 }
-/* argv[1]: "invalid" (bad manifest), "preload" (NFSU1_HD_PRELOAD=1), "p8" (NFSU1_HD_P8=1), "patch", or none. */
+static unsigned progress_calls;
+static void progress(unsigned percent) { assert(percent<=100); progress_calls++; }
+/* argv[1]: "invalid" (bad manifest), "preload" (NFSU1_HD_PRELOAD=1), "p8" (NFSU1_HD_P8=1), "patch",
+ * "prepare <game folder>" (the whole patch at the start; tools/test.py checks the files), or none. */
 int main(int argc,char **argv)
 {
     if (argc>1 && !strcmp(argv[1],"patch")) return patch_mode();
+    if (argc>2 && !strcmp(argv[1],"prepare")) {
+        nfsu1_hd_patch_prepare(argv[2],progress);
+        printf("HD prepare: progress %u\n",progress_calls);
+        return 0;
+    }
     const unsigned char source[8]={1,2,3,4,5,6,7,8};
     const unsigned char source2[16]={9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9};
     /* P8 4x4: 16 indices, then a 2-entry palette (the record's key covers both). */
