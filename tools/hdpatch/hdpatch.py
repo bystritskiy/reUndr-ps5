@@ -10,8 +10,9 @@ without the disc the patch is noise; with it, `apply` rebuilds the pack byte for
 
 On the console nothing needs to run: copy the patch folder beside the hd folder of the installed game
 (/data/reUndr/hdpatch, or reUndr/hdpatch on the USB drive that holds reUndr/game).
-The game opens each file the first time it shows that texture (hd_textures.c, from index.bin)
-and writes it into reUndr/hd; an hd folder that came from anything else is kept as hd.bak-<time>.
+On its first start the game opens every file from its own texture files, behind a loading screen
+(hd_textures.c nfsu1_hd_patch_prepare, from index.bin), and writes them into reUndr/hd; an hd folder
+that came from anything else is kept as hd.bak-<time>.
 
   make:  python3 tools/hdpatch/hdpatch.py make  --game <disc> --pack <hd> --base <PPSA99025/hd> --out <patch>
   apply: python3 tools/hdpatch/hdpatch.py apply --game <disc> --patch <patch> --base <PPSA99025/hd> --out <hd>

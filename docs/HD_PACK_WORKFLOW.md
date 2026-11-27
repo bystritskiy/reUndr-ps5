@@ -134,14 +134,18 @@ This does not change what the pack is derived from; it only means the patch alon
 On the console nothing has to run on a computer: copy the patch folder beside the game's `hd` folder
 (`/data/reUndr/hdpatch`, or `reUndr/hdpatch` on the USB drive). On the first start with a new patch the game
 moves an `hd` folder that holds a pack (it has `manifest.bin` or an earlier patch's `hdpatch.id`) to
-`hd.bak-<time>`, never deleting it, and writes the patch's manifest into a new `hd`. Each file is then opened
-the first time its texture shows, checked against its SHA-256 and written into `hd`; the log says
-`[HD] patch: opened <file> <KB> <ms>`. From then on it is an ordinary pack, and preload reads it.
+`hd.bak-<time>`, never deleting it, and writes the patch's manifest into a new `hd`. Then, before the game runs,
+an "Opening the HD textures" screen with a percentage reads the texture packs of the game folder (as
+`tools/nfs_assets.py` does), finds the key of every patched texture and opens its file: checked against its
+SHA-256 and written into `hd`. The log says `[HD] patch: <n> of <m> records opened at the start from <k> game
+files, <s> s`. `hd/hdpatch.done` then holds the patch id, so later starts skip this, and preload reads an
+ordinary pack. A record that did not open at the start (another disc revision) is tried again the first time
+its texture shows, on the render thread, as a fallback.
 
-The first start costs time: opening runs on the render thread. Measured on a PS5 (27 Nov 2026, the same
-`hd_textures.c` patch code on a 01.001.000 build, a 590 MB patch of 3569 records): the first race opened 668
-files in 17.6 s in all, a 16 MB `.rgba` in 1.1 s, which showed as hitches of up to 5 s while the race loaded
-and 0.3-1.6 s of opening per 10 s in the race. The second start preloaded 681 files and opened 45 that the
-first race had not shown (0.9 s), 41 of them while the race loaded, so that load still hitched for 0.9 s; in
-the race no hitch was above 80 ms. No file failed its SHA-256 check, and 11 files read back at random matched
-the pack byte for byte. The cost ends once every texture has been shown once.
+Measured on a PS5 (27 Nov 2026, the same `hd_textures.c` code on a 01.001.000 build, a 590 MB patch of 3569
+records): the first start opened 3569 of 3569 records from 381 game files in 121.7 s; 715 files had already
+been opened by an earlier test, so a clean first start takes somewhat longer (not measured). No file failed its
+SHA-256 check, nothing was opened during the game, and preload held all 3569 files (649 MB). Apart from one
+1.1 s frame at game start (there before this change too), no frame took longer than 67 ms; the track load,
+which hitched for 0.9 s when files were opened as textures showed, took 51 ms. The second start skipped the
+opening. 16 files read back from the console matched the pack byte for byte.

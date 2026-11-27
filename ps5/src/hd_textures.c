@@ -48,8 +48,9 @@ static void *preload(void *unused)
 uint32_t nfsu1_hd_preloaded(void) { return __atomic_load_n(&resident_count,__ATOMIC_RELAXED); }
 
 /* HD patch (tools/hdpatch): <hd>patch/ beside the hd folder holds the pack
- * with every file XORed with SHAKE-256 keyed by the original texture it replaces. A file opens
- * the first time the game shows that texture, as the bytes in hand are the key; it is checked
+ * with every file XORed with SHAKE-256 keyed by the original texture it replaces. All files open
+ * at the start from the game's texture files (nfsu1_hd_patch_prepare); one that did not opens the
+ * first time the game shows that texture, as the bytes in hand are the key. Each is checked
  * against its SHA-256 and written into the hd folder. An hd folder from anything else (an older
  * pack, prepare-disc) is kept as hd.bak-<time>, never deleted. */
 #define PATCH_DOMAIN "reUndr hdpatch 1"        /* with its NUL: hdpatch.py DOMAIN */
@@ -224,7 +225,7 @@ static int patch_open(uint32_t i,const void *source,const void *tail,uint32_t ta
     nfsu1_sha256_init(&c); nfsu1_sha256_update(&c,data,size); nfsu1_sha256_final(&c,sum);
     if (memcmp(sum,r->sha,32)) { fprintf(stderr,"[HD] patch: %s does not open with this disc\n",name); goto out; }
     if (!(ok=write_whole(path,data,size))) { fprintf(stderr,"[HD] patch: cannot write %s\n",path); goto out; }
-    /* the open runs on the renderer thread the first time a texture shows: its cost is logged */
+    /* at the start, or (a fallback) on the renderer thread the first time a texture shows: its cost is logged */
     clock_gettime(CLOCK_MONOTONIC,&t1);
     fprintf(stderr,"[HD] patch: opened %s %u KB %.1f ms\n",name,(unsigned)(size>>10),
             (t1.tv_sec-t0.tv_sec)*1e3+(t1.tv_nsec-t0.tv_nsec)/1e6);
