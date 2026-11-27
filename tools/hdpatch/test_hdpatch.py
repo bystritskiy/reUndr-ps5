@@ -37,10 +37,15 @@ with tempfile.TemporaryDirectory() as t:
     hdpatch.apply(argparse.Namespace(**vars(ns), patch=patch, out=out))
     assert all((out / n.decode()).read_bytes() == (pack / n.decode()).read_bytes() for n in names)
     assert (out / 'manifest.bin').read_bytes() == (pack / 'manifest.bin').read_bytes()
+    try:                                       # an existing pack is never written over
+        hdpatch.apply(argparse.Namespace(**vars(ns), patch=patch, out=out))
+        raise AssertionError('apply wrote over a pack')
+    except SystemExit as e:
+        assert 'already holds a pack' in str(e)
     disc[0] = b'0riginal'                      # another disc: one byte off
     try:
         hdpatch.apply(argparse.Namespace(**vars(ns), patch=patch, out=t / 'out2'))
         raise AssertionError('another disc rebuilt the pack')
     except SystemExit as e:
         assert '1 of 2 files could not be rebuilt' in str(e) and not (t / 'out2' / 'manifest.bin').exists()
-print('hdpatch: round trip byte for byte; another disc rebuilds nothing')
+print('hdpatch: round trip byte for byte; an existing pack is kept; another disc rebuilds nothing')

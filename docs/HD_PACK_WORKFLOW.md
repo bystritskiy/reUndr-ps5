@@ -128,7 +128,7 @@ python3 tools/hdpatch/hdpatch.py apply --game <disc> --patch <patch> --base <PPS
 
 Both read every texture container on the disc (a few minutes). `apply` writes `manifest.bin` only when
 every file was rebuilt, so another disc revision, a missing folder or a modified file leaves no half pack
-for the game to load; it lists what failed. `python3 tools/hdpatch/test_hdpatch.py` checks the round trip.
+for the game to load; it lists what failed. It refuses an `--out` that already holds a pack. `python3 tools/hdpatch/test_hdpatch.py` checks the round trip.
 This does not change what the pack is derived from; it only means the patch alone carries no texture.
 
 On the console nothing has to run on a computer: copy the patch folder beside the game's `hd` folder

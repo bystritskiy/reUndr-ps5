@@ -152,6 +152,8 @@ def make(a):
 
 def apply(a):
     outside_repo(a.out)
+    if (a.out / 'manifest.bin').exists():                 # as prepare-disc.py: never write over a pack
+        raise SystemExit(f'{a.out} already holds a pack; move it aside first')
     meta = json.loads((a.patch / 'patch.json').read_text(encoding='utf-8'))
     if meta.get('format') != 'reUndr hdpatch 1':
         raise SystemExit(f'{a.patch}: not a reUndr hdpatch 1 patch')
