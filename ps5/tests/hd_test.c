@@ -20,9 +20,40 @@ static uint64_t fnv(const unsigned char *p,size_t n)
     for (size_t i=0;i<n;i++) hash=(hash^p[i])*UINT64_C(0x100000001b3);
     return hash;
 }
-/* argv[1]: "invalid" (bad manifest), "preload" (NFSU1_HD_PRELOAD=1), "p8" (NFSU1_HD_P8=1), or none. */
+/* "patch": tools/test.py wrote an hdpatch (Python hashlib) beside NFSU1_HD_DIR; records 0x1111 and
+ * 0x2222 share one encrypted NHD1 file, 0x3333 comes from the release folder, 0x4444 is damaged. */
+static int patch_mode(void)
+{
+    unsigned char s[4][8];
+    for (int r=0;r<4;r++) for (int k=0;k<8;k++) s[r][k]=(unsigned char)(10*r+k+1);
+    NfsHdPixels info;
+    const NfsHdTexture *t=nfsu1_hd_find(s[1],12,4,4,8,0x2222);     /* the record the file was not made with */
+    assert(t);
+    void *p=nfsu1_hd_load(t,&info);
+    assert(p && info.color==0 && info.bytes==256);
+    for (unsigned k=0;k<256;k++) assert(((unsigned char *)p)[k]==(unsigned char)(k*7));
+    free(p);
+    assert(nfsu1_hd_find(s[0],12,4,4,8,0x1111));
+    assert((t=nfsu1_hd_find(s[2],12,4,4,8,0x3333)) && (p=nfsu1_hd_load(t,&info)) && info.bytes==256);
+    free(p);
+    assert(!nfsu1_hd_find(s[3],12,4,4,8,0x4444));
+    unsigned char other[8]={0};
+    assert(!nfsu1_hd_find(other,12,4,4,8,0x1111));
+    puts("HD patch: opened by the original in hand, shared file, release copy, damaged file refused");
+    return 0;
+}
+static unsigned progress_calls;
+static void progress(unsigned percent) { assert(percent<=100); progress_calls++; }
+/* argv[1]: "invalid" (bad manifest), "preload" (NFSU1_HD_PRELOAD=1), "p8" (NFSU1_HD_P8=1), "patch",
+ * "prepare <game folder>" (the whole patch at the start; tools/test.py checks the files), or none. */
 int main(int argc,char **argv)
 {
+    if (argc>1 && !strcmp(argv[1],"patch")) return patch_mode();
+    if (argc>2 && !strcmp(argv[1],"prepare")) {
+        nfsu1_hd_patch_prepare(argv[2],progress);
+        printf("HD prepare: progress %u\n",progress_calls);
+        return 0;
+    }
     const unsigned char source[8]={1,2,3,4,5,6,7,8};
     const unsigned char source2[16]={9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9};
     /* P8 4x4: 16 indices, then a 2-entry palette (the record's key covers both). */

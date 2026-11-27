@@ -109,3 +109,43 @@ not in it: the game composites them at run time, so no file on the disc holds th
 `tools/build-hd-pack.py` (also in this PR) converts a TexMod `.tpf` retexture you own into the same
 format, keyed by exact Xbox bytes. It was used for a first test with a PC retexture pack, which was then
 replaced entirely by the workflow above, because that pack's art differs from the original.
+
+## Sharing a pack: a patch that needs the disc
+
+A finished pack is made of the disc's own textures, so it is not shared as it is. `tools/hdpatch/hdpatch.py`
+turns it into a patch that is noise without the disc: each file is XORed with a SHAKE-256 stream keyed by
+the SHA-256 of the original texture it replaces (the bytes the runtime hashes to find it). That key is not
+in the patch; whoever has the disc derives it again, and `apply` rebuilds the pack byte for byte, checking
+every file against its SHA-256. Files that ship in the release package (`PPSA99025/hd`) are not in the
+patch; `apply` takes them from `--base`.
+
+```sh
+# the pack's author
+python3 tools/hdpatch/hdpatch.py make  --game <disc> --pack <hd> --base <PPSA99025/hd> --out <patch>
+# everyone else: their own disc + the patch -> the same hd folder
+python3 tools/hdpatch/hdpatch.py apply --game <disc> --patch <patch> --base <PPSA99025/hd> --out <hd>
+```
+
+Both read every texture container on the disc (a few minutes). `apply` writes `manifest.bin` only when
+every file was rebuilt, so another disc revision, a missing folder or a modified file leaves no half pack
+for the game to load; it lists what failed. It refuses an `--out` that already holds a pack. `python3 tools/hdpatch/test_hdpatch.py` checks the round trip.
+This does not change what the pack is derived from; it only means the patch alone carries no texture.
+
+On the console nothing has to run on a computer: copy the patch folder beside the game's `hd` folder
+(`/data/reUndr/hdpatch`, or `reUndr/hdpatch` on the USB drive). On the first start with a new patch the game
+moves an `hd` folder that holds a pack (it has `manifest.bin` or an earlier patch's `hdpatch.id`) to
+`hd.bak-<time>`, never deleting it, and writes the patch's manifest into a new `hd`. Then, before the game runs,
+an "Opening the HD textures" screen with a percentage reads the texture packs of the game folder (as
+`tools/nfs_assets.py` does), finds the key of every patched texture and opens its file: checked against its
+SHA-256 and written into `hd`. The log says `[HD] patch: <n> of <m> records opened at the start from <k> game
+files, <s> s`. `hd/hdpatch.done` then holds the patch id, so later starts skip this, and preload reads an
+ordinary pack. A record that did not open at the start (another disc revision) is tried again the first time
+its texture shows, on the render thread, as a fallback.
+
+Measured on a PS5 (27 Nov 2026, the same `hd_textures.c` code on a 01.001.000 build, a 590 MB patch of 3569
+records): the first start opened 3569 of 3569 records from 381 game files in 121.7 s; 715 files had already
+been opened by an earlier test, so a clean first start takes somewhat longer (not measured). No file failed its
+SHA-256 check, nothing was opened during the game, and preload held all 3569 files (649 MB). Apart from one
+1.1 s frame at game start (there before this change too), no frame took longer than 67 ms; the track load,
+which hitched for 0.9 s when files were opened as textures showed, took 51 ms. The second start skipped the
+opening. 16 files read back from the console matched the pack byte for byte.

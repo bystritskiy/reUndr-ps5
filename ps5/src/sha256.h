@@ -15,6 +15,7 @@ typedef struct {
 
 void nfsu1_sha256_init(Nfsu1Sha256 *c);
 void nfsu1_sha256_update(Nfsu1Sha256 *c, const void *data, size_t size);
+void nfsu1_sha256_final(Nfsu1Sha256 *c, uint8_t digest[32]);
 /* Upper-case hexadecimal, as in game_revision.h. */
 void nfsu1_sha256_hex(Nfsu1Sha256 *c, char hex[65]);
 /* 1 and the digest of a whole file, 0 when it cannot be read. */

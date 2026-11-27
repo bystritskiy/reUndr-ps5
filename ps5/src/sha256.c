@@ -65,9 +65,8 @@ void nfsu1_sha256_update(Nfsu1Sha256 *c, const void *data, size_t size)
     }
 }
 
-void nfsu1_sha256_hex(Nfsu1Sha256 *c, char hex[65])
+void nfsu1_sha256_final(Nfsu1Sha256 *c, uint8_t digest[32])
 {
-    static const char digits[] = "0123456789ABCDEF";
     uint64_t bits = c->bytes * 8;
     uint8_t pad = 0x80, len[8];
     int i;
@@ -77,8 +76,17 @@ void nfsu1_sha256_hex(Nfsu1Sha256 *c, char hex[65])
         nfsu1_sha256_update(c, &pad, 1);
     for (i = 0; i < 8; i++) len[i] = (uint8_t)(bits >> (56 - 8 * i));
     nfsu1_sha256_update(c, len, 8);
+    for (i = 0; i < 32; i++) digest[i] = (uint8_t)(c->state[i / 4] >> (24 - 8 * (i % 4)));
+}
+
+void nfsu1_sha256_hex(Nfsu1Sha256 *c, char hex[65])
+{
+    static const char digits[] = "0123456789ABCDEF";
+    uint8_t digest[32];
+    int i;
+    nfsu1_sha256_final(c, digest);
     for (i = 0; i < 32; i++) {
-        uint8_t v = (uint8_t)(c->state[i / 4] >> (24 - 8 * (i % 4)));
+        uint8_t v = digest[i];
         hex[i * 2] = digits[v >> 4];
         hex[i * 2 + 1] = digits[v & 15];
     }
