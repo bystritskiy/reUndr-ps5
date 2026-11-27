@@ -130,3 +130,18 @@ Both read every texture container on the disc (a few minutes). `apply` writes `m
 every file was rebuilt, so another disc revision, a missing folder or a modified file leaves no half pack
 for the game to load; it lists what failed. `python3 tools/hdpatch/test_hdpatch.py` checks the round trip.
 This does not change what the pack is derived from; it only means the patch alone carries no texture.
+
+On the console nothing has to run on a computer: copy the patch folder beside the game's `hd` folder
+(`/data/reUndr/hdpatch`, or `reUndr/hdpatch` on the USB drive). On the first start with a new patch the game
+moves an `hd` folder that holds a pack (it has `manifest.bin` or an earlier patch's `hdpatch.id`) to
+`hd.bak-<time>`, never deleting it, and writes the patch's manifest into a new `hd`. Each file is then opened
+the first time its texture shows, checked against its SHA-256 and written into `hd`; the log says
+`[HD] patch: opened <file> <KB> <ms>`. From then on it is an ordinary pack, and preload reads it.
+
+The first start costs time: opening runs on the render thread. Measured on a PS5 (27 Nov 2026, the same
+`hd_textures.c` patch code on a 01.001.000 build, a 590 MB patch of 3569 records): the first race opened 668
+files in 17.6 s in all, a 16 MB `.rgba` in 1.1 s, which showed as hitches of up to 5 s while the race loaded
+and 0.3-1.6 s of opening per 10 s in the race. The second start preloaded 681 files and opened 45 that the
+first race had not shown (0.9 s), 41 of them while the race loaded, so that load still hitched for 0.9 s; in
+the race no hitch was above 80 ms. No file failed its SHA-256 check, and 11 files read back at random matched
+the pack byte for byte. The cost ends once every texture has been shown once.
